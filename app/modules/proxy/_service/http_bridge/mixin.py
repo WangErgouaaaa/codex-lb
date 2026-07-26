@@ -236,6 +236,26 @@ class _HTTPBridgeMixin(
     _HTTPBridgeUpstreamEventsMixin,
     _HTTPBridgeServiceProtocol,
 ):
+    def _record_http_bridge_quarantine(self, key: "_HTTPBridgeSessionKey") -> None:
+        settings = _service_get_settings()
+        now = _service_time().monotonic()
+        quarantine_until = self._http_bridge_quarantine_until
+        for expired_key, expires_at in tuple(quarantine_until.items()):
+            if expires_at <= now:
+                quarantine_until.pop(expired_key, None)
+
+        quarantine_seconds = float(settings.http_responses_session_bridge_quarantine_seconds)
+        if quarantine_seconds <= 0:
+            quarantine_until.pop(key, None)
+            return
+
+        quarantine_until[key] = now + quarantine_seconds
+        max_entries = int(settings.http_responses_session_bridge_max_sessions)
+        overflow = len(quarantine_until) - max_entries
+        if overflow > 0:
+            for oldest_key in sorted(quarantine_until, key=quarantine_until.__getitem__)[:overflow]:
+                quarantine_until.pop(oldest_key, None)
+
     async def _close_http_bridge_session_bounded(
         self,
         session: "_HTTPBridgeSession",
@@ -1574,6 +1594,7 @@ class _HTTPBridgeMixin(
             self._http_bridge_sessions.clear()
             self._http_bridge_inflight_sessions.clear()
             self._http_bridge_previous_response_index.clear()
+            self._http_bridge_quarantine_until.clear()
         shutdown_error = ProxyResponseError(
             503,
             openai_error(
@@ -1649,12 +1670,11 @@ class _HTTPBridgeMixin(
             await self._unregister_http_bridge_turn_states(session)
             await self._unregister_http_bridge_previous_response_ids(session)
         account_lease = getattr(session, "account_lease", None)
+        session.account_lease = None
         try:
             await self._load_balancer.release_account_lease(account_lease)
         except Exception:
             logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
-        finally:
-            session.account_lease = None
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:
             try:
                 await self._durable_bridge.release_live_session(
@@ -2083,6 +2103,8 @@ class _HTTPBridgeMixin(
                 return
             if lease is session.account_lease:
                 session.account_lease = None
+            if lease is request_state.websocket_stream_lease:
+                request_state.websocket_stream_lease = None
             await self._load_balancer.release_account_lease(lease)
 
         async def abandon_selected_account_retry(selected_account: Any) -> None:
@@ -2095,7 +2117,9 @@ class _HTTPBridgeMixin(
             await release_selected_account_lease()
 
         while True:
-            reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
+            reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(
+                session.account_lease or request_state.websocket_stream_lease
+            )
             selection = await self._select_account_with_budget_for_stream(
                 deadline,
                 request_id=request_state.request_log_id or request_state.request_id,
@@ -2184,7 +2208,7 @@ class _HTTPBridgeMixin(
                 record_selected_account_takeover(account.id, required_preferred_account_id)
                 raise _http_bridge_previous_response_owner_unavailable_error()
             selected_account_lease = (
-                session.account_lease
+                session.account_lease or request_state.websocket_stream_lease
                 if reuse_current_account_lease and account.id == session.account.id
                 else selection.lease
             )
@@ -2307,10 +2331,16 @@ class _HTTPBridgeMixin(
             await old_upstream.close()
         except Exception:
             logger.debug("Failed to close HTTP bridge upstream websocket before reconnect", exc_info=True)
-        if selected_account_lease is not session.account_lease:
-            await self._load_balancer.release_account_lease(session.account_lease)
+        request_stream_lease = request_state.websocket_stream_lease
+        session_stream_lease = session.account_lease
+        if session_stream_lease is not None and selected_account_lease is not session_stream_lease:
+            await self._load_balancer.release_account_lease(session_stream_lease)
+        if request_stream_lease is not None and selected_account_lease is not request_stream_lease:
+            await self._load_balancer.release_account_lease(request_stream_lease)
         session.account_lease = selected_account_lease
         session.account, session.headers, session.upstream = account, connect_headers, upstream
+        request_state.websocket_stream_lease = session.account_lease
+        session.account_lease = None
         session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
         session.upstream_control = _WebSocketUpstreamControl()
         session.closed = False

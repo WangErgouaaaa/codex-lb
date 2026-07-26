@@ -297,6 +297,8 @@ class Settings(BaseSettings):
     http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
+    http_responses_session_bridge_response_created_timeout_seconds: float = Field(default=5.0, gt=0)
+    http_responses_session_bridge_quarantine_seconds: float = Field(default=60.0, ge=0)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool = False
@@ -360,6 +362,7 @@ class Settings(BaseSettings):
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
+    strict_service_tier_account_filter: bool = True
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     proxy_unauthenticated_client_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     firewall_trust_proxy_headers: bool = False

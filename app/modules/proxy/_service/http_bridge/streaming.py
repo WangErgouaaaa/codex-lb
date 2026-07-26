@@ -217,6 +217,21 @@ _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
+def _http_bridge_quarantine_remaining_seconds(
+    service: Any,
+    key: _HTTPBridgeSessionKey,
+) -> float:
+    now = _service_time().monotonic()
+    quarantine_until = service._http_bridge_quarantine_until
+    for expired_key, expires_at in tuple(quarantine_until.items()):
+        if expires_at <= now:
+            quarantine_until.pop(expired_key, None)
+    expires_at = quarantine_until.get(key)
+    if expires_at is None:
+        return 0.0
+    return expires_at - now
+
+
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
     return responses_payload_is_account_neutral_fresh_replay(payload.to_payload())
 
@@ -687,7 +702,6 @@ class _HTTPBridgeStreamingMixin:
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
-        del suppress_text_done_events
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -726,6 +740,41 @@ class _HTTPBridgeStreamingMixin:
                 request_id=request_id,
                 client_ip=client_ip,
             )
+
+        async def stream_quarantined_request_via_http(
+            key: _HTTPBridgeSessionKey,
+            *,
+            remaining_seconds: float,
+            required_preferred_account_id: str | None,
+        ) -> AsyncIterator[str]:
+            _log_http_bridge_event(
+                "quarantine_http_fallback",
+                key,
+                account_id=required_preferred_account_id,
+                model=payload.model,
+                detail=f"remaining_seconds={remaining_seconds:.3f}",
+                cache_key_family=key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=required_preferred_account_id is not None,
+            )
+            stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
+            async for line in stream_with_retry(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                request_transport=_REQUEST_TRANSPORT_HTTP,
+                rewritten_file_account_id=rewritten_file_account_id,
+                required_preferred_account_id=required_preferred_account_id,
+                upstream_stream_transport_override=_REQUEST_TRANSPORT_HTTP,
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
+                yield line
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
@@ -767,6 +816,11 @@ class _HTTPBridgeStreamingMixin:
             forwarded_affinity_kind=forwarded_affinity_kind,
             forwarded_affinity_key=forwarded_affinity_key,
         )
+        quarantine_remaining_seconds = _http_bridge_quarantine_remaining_seconds(
+            self,
+            bridge_session_key,
+        )
+        quarantined_bridge_session_key = bridge_session_key
         durable_lookup_turn_state = (
             downstream_turn_state
             if forwarded_request
@@ -924,6 +978,45 @@ class _HTTPBridgeStreamingMixin:
                 durable_lookup.canonical_key,
                 bridge_session_key.api_key_id,
             )
+            canonical_quarantine_remaining_seconds = _http_bridge_quarantine_remaining_seconds(
+                self,
+                bridge_session_key,
+            )
+            if canonical_quarantine_remaining_seconds > 0:
+                quarantine_remaining_seconds = canonical_quarantine_remaining_seconds
+                quarantined_bridge_session_key = bridge_session_key
+            if quarantine_remaining_seconds > 0:
+                durable_lookup_requires_owner = (
+                    payload.previous_response_id is not None
+                    or bridge_session_key.strength == "hard"
+                    or (
+                        bridge_session_key.affinity_kind == "prompt_cache"
+                        and _http_bridge_request_stage(
+                            headers=headers,
+                            payload=payload,
+                            durable_lookup=durable_lookup,
+                        )
+                        == "follow_up"
+                        and durable_lookup.latest_turn_state is not None
+                    )
+                )
+                if durable_lookup_requires_owner and durable_lookup.account_id is None:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "previous_response_owner_unavailable",
+                            "Previous response owner account is unavailable; retry later.",
+                        ),
+                    )
+                async for line in stream_quarantined_request_via_http(
+                    quarantined_bridge_session_key,
+                    remaining_seconds=quarantine_remaining_seconds,
+                    required_preferred_account_id=(
+                        durable_lookup.account_id if durable_lookup_requires_owner else None
+                    ),
+                ):
+                    yield line
+                return
             live_local_session_exists = await self._http_bridge_has_live_local_session(
                 key=bridge_session_key,
                 incoming_turn_state=incoming_turn_state_header,
@@ -968,6 +1061,27 @@ class _HTTPBridgeStreamingMixin:
                         cache_key_family=bridge_session_key.affinity_kind,
                         model_class=_extract_model_class(payload.model) if payload.model else None,
                     )
+        elif quarantine_remaining_seconds > 0:
+            model_transition_owner_account_id = (
+                durable_model_transition_lookup.account_id
+                if durable_model_transition_requires_owner and durable_model_transition_lookup is not None
+                else None
+            )
+            if durable_model_transition_requires_owner and model_transition_owner_account_id is None:
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "previous_response_owner_unavailable",
+                        "Previous response owner account is unavailable; retry later.",
+                    ),
+                )
+            async for line in stream_quarantined_request_via_http(
+                quarantined_bridge_session_key,
+                remaining_seconds=quarantine_remaining_seconds,
+                required_preferred_account_id=model_transition_owner_account_id,
+            ):
+                yield line
+            return
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=bridge_session_key.affinity_kind,
             key=bridge_session_key.affinity_key,

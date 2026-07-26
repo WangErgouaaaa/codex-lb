@@ -927,6 +927,7 @@ class ProxyService(
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
+        self._http_bridge_quarantine_until: dict[_HTTPBridgeSessionKey, float] = {}
         self._websocket_previous_response_account_index: dict[tuple[str, str | None, str | None], str] = {}
         self._websocket_continuity_index: dict[tuple[str, str | None], _WebSocketContinuityState] = {}
         self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
@@ -1372,6 +1373,16 @@ class ProxyService(
         lease = request_state.account_response_create_lease
         request_state.account_response_create_lease = None
         request_state.account_response_create_release = None
+        await self._load_balancer.release_account_lease(lease)
+
+    async def _release_request_state_stream_lease(
+        self,
+        request_state: "_WebSocketRequestState",
+    ) -> None:
+        lease = request_state.websocket_stream_lease
+        request_state.websocket_stream_lease = None
+        if lease is None:
+            return
         await self._load_balancer.release_account_lease(lease)
 
     async def _select_account_with_budget_compatible(

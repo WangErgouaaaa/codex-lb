@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Collection
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Literal, cast
@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.modules.proxy.load_balancer as load_balancer_module
+import app.modules.proxy.service as proxy_service
 from app.core.balancer import (
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
@@ -2678,6 +2679,56 @@ async def test_legacy_raw_owner_conflict_blocks_resolved_preferred_owner() -> No
     assert sticky_repo.account_ids_by_key == {raw_session: owner.id}
     assert sticky_repo.deleted == []
     assert sticky_repo.upserts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preferred_account_is_continuity_owner", "expects_authoritative_owner", "expected_error_code"),
+    [
+        (True, True, None),
+        (False, False, "continuity_owner_conflict"),
+    ],
+)
+async def test_service_only_bypasses_conflicting_legacy_raw_owner_for_authoritative_continuity(
+    monkeypatch: pytest.MonkeyPatch,
+    preferred_account_is_continuity_owner: bool,
+    expects_authoritative_owner: bool,
+    expected_error_code: str | None,
+) -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("legacy-service-conflict")
+    assert alternate is not None
+    raw_session = "legacy-service-preferred-session"
+    sticky_repo.account_ids_by_key = {raw_session: owner.id}
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._load_balancer = balancer
+
+    class _SettingsCache:
+        async def get(self) -> object:
+            return proxy_service.get_settings()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache())
+
+    selected = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-legacy-service-preferred-conflict",
+        kind="http_bridge",
+        request_stage="follow_up",
+        sticky_key=_codex_session_selection_key(raw_session),
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        preferred_account_id=alternate.id,
+        preferred_account_is_continuity_owner=preferred_account_is_continuity_owner,
+        fallback_on_preferred_account_unavailable=False,
+        lease_kind="stream",
+    )
+
+    assert (selected.account is not None and selected.account.id == alternate.id) is expects_authoritative_owner
+    assert selected.error_code == expected_error_code
+    assert sticky_repo.account_ids_by_key == {raw_session: owner.id}
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+    await balancer.release_account_lease(selected.lease)
 
 
 @pytest.mark.asyncio

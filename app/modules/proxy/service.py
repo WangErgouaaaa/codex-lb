@@ -1830,6 +1830,7 @@ class ProxyService(
                         sticky_max_age_seconds,
                         sticky_source,
                         legacy_sticky_key,
+                        authoritative_continuity_owner=required_continuity_preferred_account,
                     )
                     preferred_selection = await self._load_balancer.select_account(
                         sticky_key=preferred_sticky_inputs[0],

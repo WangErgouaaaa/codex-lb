@@ -78,6 +78,8 @@ class _AffinityPolicy:
         sticky_max_age_seconds: int | None,
         sticky_source: _CodexSessionSource | None,
         legacy_sticky_key: str | None,
+        *,
+        authoritative_continuity_owner: bool = False,
     ) -> tuple[
         str | None,
         StickySessionKind | None,
@@ -97,9 +99,19 @@ class _AffinityPolicy:
             )
         # A resolved response/file/bridge owner bypasses the new soft row, but
         # the raw compatibility row still has to be checked for conflicting
-        # legacy hard ownership. Selection receives no writable sticky key, so
-        # a raw miss cannot manufacture or rebind a mapping.
-        return None, StickySessionKind.CODEX_SESSION, False, sticky_max_age_seconds, sticky_source, legacy_sticky_key
+        # legacy hard ownership unless the preferred account is already proven
+        # by current continuity metadata. In that case, the raw session-header
+        # row has unknown pre-namespace provenance and cannot overrule the
+        # explicit owner. Selection receives no writable sticky key, so a raw
+        # miss cannot manufacture or rebind a mapping.
+        return (
+            None,
+            StickySessionKind.CODEX_SESSION,
+            False,
+            sticky_max_age_seconds,
+            sticky_source,
+            None if authoritative_continuity_owner else legacy_sticky_key,
+        )
 
 
 def _codex_session_selection_key(key: str) -> str:

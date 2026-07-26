@@ -5698,6 +5698,63 @@ async def test_select_account_with_budget_rejects_continuity_owner_outside_singl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preferred_account_is_continuity_owner", "expected_legacy_sticky_key"),
+    [
+        (True, None),
+        (False, "legacy-session"),
+    ],
+)
+async def test_select_account_with_budget_only_continuity_owner_ignores_legacy_raw_session_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    preferred_account_is_continuity_owner: bool,
+    expected_legacy_sticky_key: str | None,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    selected_account = cast(Any, SimpleNamespace(id="acc-preferred-owner"))
+    select_account = AsyncMock(
+        return_value=proxy_service.AccountSelection(
+            account=selected_account,
+            error_message=None,
+            error_code=None,
+        )
+    )
+    service._load_balancer = cast(Any, SimpleNamespace(select_account=select_account))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(sticky_reallocation_budget_threshold_pct=95.0))
+        ),
+    )
+
+    selection = await service._select_account_with_budget(
+        time.monotonic() + 60.0,
+        request_id="req-preferred-owner-legacy-session-hint",
+        kind="http_bridge",
+        request_stage="follow_up",
+        sticky_key="\ncodex-lb-affinity-v1:session_header:test-preferred-owner",
+        sticky_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key="legacy-session",
+        preferred_account_id=selected_account.id,
+        preferred_account_is_continuity_owner=preferred_account_is_continuity_owner,
+        lease_kind="stream",
+        fallback_on_preferred_account_unavailable=False,
+    )
+
+    assert selection.account is selected_account
+    select_account.assert_awaited_once()
+    selection_call = select_account.await_args
+    assert selection_call is not None
+    assert selection_call.kwargs["sticky_key"] is None
+    assert selection_call.kwargs["sticky_source"] == "session_header"
+    assert selection_call.kwargs["legacy_sticky_key"] == expected_legacy_sticky_key
+    assert selection_call.kwargs["required_account_id"] == selected_account.id
+    assert selection_call.kwargs["required_continuity_owner"] is preferred_account_is_continuity_owner
+
+
+@pytest.mark.asyncio
 async def test_select_account_with_budget_required_preferred_does_not_fallback_when_excluded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

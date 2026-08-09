@@ -267,6 +267,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.continuity import _record_http_stream_continuity_completion
 from app.modules.proxy._service.streaming.helpers import (
     _handle_stream_error as _handle_stream_error_helper,
 )
@@ -299,6 +300,7 @@ from app.modules.proxy._service.support import (
     _StreamSettlement,
     _TerminalStreamError,
     _ttft_event_latency_ms,
+    _WebSocketContinuityState,
     _WebSocketUpstreamControl,
 )
 from app.modules.proxy._service.support import (
@@ -487,6 +489,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         conversation_id: str | None = None,
         client_ip: str | None = None,
         preferred_account_id: str | None = None,
+        continuity_state: _WebSocketContinuityState | None = None,
         tool_call_dedupe: _WebSocketUpstreamControl | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
@@ -762,6 +765,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.downstream_visible = True
                     if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         settlement.downstream_text_visible = True
+                    _record_http_stream_continuity_completion(continuity_state, payload, event)
                     yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
@@ -942,6 +946,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.downstream_visible = True
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     settlement.downstream_text_visible = True
+                _record_http_stream_continuity_completion(continuity_state, payload, event)
                 yield line
             if not terminal_event_seen:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)

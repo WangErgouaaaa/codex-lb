@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import re
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
+from hashlib import sha256
 from typing import Any, Literal, NoReturn, Protocol
 
 import anyio
@@ -42,6 +44,13 @@ from app.modules.proxy.tool_call_dedupe import ToolCallDedupeKey
 from app.modules.proxy.work_admission import AdmissionLease
 
 logger = logging.getLogger(__name__)
+
+
+def _fingerprint_input_items(items: Sequence[JsonValue]) -> str:
+    """Return stable SHA-256 fingerprint for input list canonical JSON."""
+    canonical = json.dumps(list(items), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"

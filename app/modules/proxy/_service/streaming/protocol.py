@@ -25,5 +25,6 @@ class _StreamingServiceProtocol(Protocol):
     _stream_once: Any
     _stream_with_retry: Any
     _websocket_continuity_index: Any
+    _websocket_continuity_state_for_request: Any
     _write_request_log: Any
     _write_stream_preflight_error: Any

@@ -30,6 +30,7 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.errors import openai_error
+from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, HttpBridgeSessionState
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
@@ -14554,9 +14555,31 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    fresh_text = (
-        '{"type":"response.create","model":"gpt-5.6-sol",'
-        '"input":[{"role":"user","content":[{"type":"input_text","text":"full resend"}]}]}'
+    retained_prefix: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old question"}],
+        }
+    ]
+    full_replay_input: list[JsonValue] = [
+        *retained_prefix,
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "old answer"}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "next question"}],
+        },
+    ]
+    fresh_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": full_replay_input,
+        },
+        separators=(",", ":"),
     )
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-verified-owner-limit",
@@ -14604,19 +14627,22 @@ async def test_http_bridge_replays_proxy_verified_full_resend_after_owner_quota(
         idle_ttl_seconds=120.0,
         upstream_turn_state="turn-old-account",
         downstream_turn_state="turn-client-alias",
+        last_completed_response_id="resp_verified_owner",
+        last_completed_input_count=len(retained_prefix),
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(retained_prefix),
     )
     handle_stream_error = AsyncMock()
     release_create_lease = AsyncMock()
 
     async def retry_precreated(retry_session):
         assert retry_session is session
-        assert session.upstream_turn_state is None
-        assert session.downstream_turn_state is None
-        assert request_state.previous_response_id is None
-        assert request_state.preferred_account_id is None
-        assert request_state.request_text == fresh_text
-        assert request_state.excluded_account_ids == {account.id}
-        assert request_state.affinity_policy.reallocate_sticky is True
+        assert session.upstream_turn_state == "turn-old-account"
+        assert session.downstream_turn_state == "turn-client-alias"
+        assert request_state.previous_response_id == "resp_verified_owner"
+        assert request_state.preferred_account_id == account.id
+        assert request_state.request_text != fresh_text
+        assert request_state.excluded_account_ids == set()
+        assert request_state.affinity_policy.reallocate_sticky is False
         assert list(session.pending_requests) == [request_state]
         return True
 

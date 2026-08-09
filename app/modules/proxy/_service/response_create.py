@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -144,12 +144,6 @@ def _prune_response_create_dumps(dump_dir: Path, *, max_pairs: int) -> None:
                 stale_path.unlink(missing_ok=True)
             except OSError:
                 logger.warning("Failed to prune response.create dump path=%s", stale_path, exc_info=True)
-
-
-def _fingerprint_input_items(items: Sequence[JsonValue]) -> str:
-    """Return stable SHA-256 fingerprint for input list canonical JSON."""
-    canonical = json.dumps(list(items), ensure_ascii=True, separators=(",", ":"), sort_keys=True)
-    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _input_part_is_image(part: JsonValue) -> bool:

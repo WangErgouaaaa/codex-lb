@@ -87,6 +87,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _estimated_lease_tokens_from_request_usage_budget,
     _fingerprint_input_items,
     _inline_top_level_input_image_urls,
+    _input_prefix_matches_stored_context,
     _normalize_service_tier_value,
     _normalize_session_id,
     _prepare_websocket_request_state_for_account_switch,
@@ -182,6 +183,10 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
 )
 from app.modules.proxy.load_balancer import effective_account_concurrency_caps
+from app.modules.proxy.replay_safety import (
+    responses_input_suffix_retains_prior_output,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -287,6 +292,51 @@ def _request_kind_from_headers(headers: Mapping[str, str] | None) -> str:
     if request_kind in {"normal", "prewarm"}:
         return request_kind
     return "normal"
+
+
+def _verified_http_bridge_hard_owner_full_replay(
+    session: "_HTTPBridgeSession",
+    request_state: _WebSocketRequestState,
+) -> str | None:
+    """Return a full fresh body only when local continuity proves it portable."""
+
+    fresh_request_text = request_state.fresh_upstream_request_text
+    if not (
+        request_state.previous_response_id is not None
+        and request_state.previous_response_id == session.last_completed_response_id
+        and request_state.proxy_injected_previous_response_id
+        and request_state.fresh_upstream_request_is_retry_safe
+        and fresh_request_text
+    ):
+        return None
+    try:
+        raw_payload = json.loads(fresh_request_text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw_payload, dict) or raw_payload.get("type") != "response.create":
+        return None
+    response_payload = dict(raw_payload)
+    response_payload.pop("type", None)
+    try:
+        payload = ResponsesRequest.model_validate(response_payload)
+    except ValueError:
+        return None
+    input_value = payload.input
+    if not isinstance(input_value, list):
+        return None
+    input_items = cast(list[JsonValue], input_value)
+    stored_count = session.last_completed_input_count
+    if not _input_prefix_matches_stored_context(
+        input_items,
+        stored_count=stored_count,
+        stored_fingerprint=session.last_completed_input_prefix_fingerprint,
+    ):
+        return None
+    if not responses_input_suffix_retains_prior_output(input_items, stored_count=stored_count):
+        return None
+    if not responses_payload_is_account_neutral_fresh_replay(payload.to_payload()):
+        return None
+    return fresh_request_text
 
 
 class _HTTPBridgeRequestSubmitMixin:
@@ -1504,6 +1554,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     f"(close_code={session.last_upstream_close_code})"
                 )
                 return False
+            verified_hard_owner_full_replay = (
+                _verified_http_bridge_hard_owner_full_replay(session, request_state) if hard_owner_bound else None
+            )
+            owner_account_id = session.account.id
+            owner_rebind_affinity: _AffinityPolicy | None = None
+            replacement_session_affinity: _AffinityPolicy | None = None
             if request_state.previous_response_id is not None:
                 require_preferred_reconnect = False
                 if account_neutral_recovery:
@@ -1529,7 +1585,25 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                     if request_text is None:
                         return False
-                    if not hard_owner_bound:
+                    if verified_hard_owner_full_replay is not None:
+                        request_state.preferred_account_id = None
+                        request_state.excluded_account_ids.add(owner_account_id)
+                        request_state.affinity_policy = replace(
+                            request_state.affinity_policy,
+                            key=None,
+                            kind=None,
+                            reallocate_sticky=True,
+                            codex_session_source=None,
+                        )
+                        owner_rebind_affinity = session.affinity
+                        replacement_session_affinity = replace(
+                            session.affinity,
+                            key=None,
+                            kind=None,
+                            reallocate_sticky=True,
+                            codex_session_source=None,
+                        )
+                    elif not hard_owner_bound:
                         request_state.excluded_account_ids.add(session.account.id)
             else:
                 require_preferred_reconnect = account_neutral_recovery
@@ -1541,7 +1615,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 elif not request_state.file_required_preferred_account and not hard_owner_bound:
                     request_state.preferred_account_id = None
                     request_state.excluded_account_ids.add(session.account.id)
-            if session.account.id in request_state.excluded_account_ids:
+            if session.account.id in request_state.excluded_account_ids and owner_rebind_affinity is None:
                 session.upstream_turn_state = None
                 session.downstream_turn_state = None
                 session.headers = {
@@ -1556,8 +1630,34 @@ class _HTTPBridgeRequestSubmitMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        reconnected_with_owner_rebind = False
         try:
-            if hard_owner_bound:
+            if owner_rebind_affinity is not None and replacement_session_affinity is not None:
+                await self._release_request_state_account_response_create_lease(request_state)
+                await _call_with_supported_optional_kwargs(
+                    self._reconnect_http_bridge_session,
+                    session,
+                    optional_kwargs={
+                        "owner_rebind_affinity": owner_rebind_affinity,
+                        "selection_affinity": replacement_session_affinity,
+                    },
+                    request_state=request_state,
+                    require_same_account=False,
+                )
+                reconnected_with_owner_rebind = True
+                if (
+                    session.account.id != owner_account_id
+                    and owner_rebind_affinity.codex_session_source == "session_header"
+                    and owner_rebind_affinity.selection_key is not None
+                    and owner_rebind_affinity.kind is not None
+                ):
+                    async with self._repo_factory() as repos:
+                        await repos.sticky_sessions.upsert(
+                            owner_rebind_affinity.selection_key,
+                            session.account.id,
+                            kind=owner_rebind_affinity.kind,
+                        )
+            elif hard_owner_bound:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,
@@ -1594,6 +1694,10 @@ class _HTTPBridgeRequestSubmitMixin:
         except UpstreamWebSocketTransportError:
             raise
         except Exception as exc:
+            if reconnected_with_owner_rebind:
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                await self._retire_http_bridge_after_drain_if_ready(session)
             (
                 request_state.error_http_status_override,
                 request_state.error_code_override,

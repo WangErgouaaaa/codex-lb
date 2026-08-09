@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import replace
 from typing import Any, TypeVar, cast
 
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
@@ -53,6 +52,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _normalize_http_bridge_error_event,
     _record_http_bridge_stuck_retire,
 )
+from app.modules.proxy._service.http_bridge.request_submit import (
+    _verified_http_bridge_hard_owner_full_replay,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
     _await_cancelled_task,
@@ -68,7 +70,6 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _maybe_rewrite_websocket_previous_response_not_found_event,
     _pop_matching_websocket_request_states,
     _pop_terminal_websocket_request_state,
-    _prepare_websocket_request_state_for_account_switch,
     _previous_response_id_from_not_found_message,
     _release_websocket_response_create_gate,
     _response_output_item_done_tool_call,
@@ -936,19 +937,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                 and status_request_state.previous_response_id is not None
                 and status_request_state.preferred_account_id is not None
             ):
-                safe_request_text = _prepare_websocket_request_state_for_account_switch(status_request_state)
-                if safe_request_text is not None:
-                    previous_upstream_turn_state = session.upstream_turn_state
-                    previous_downstream_turn_state = session.downstream_turn_state
-                    session.upstream_turn_state = None
-                    session.downstream_turn_state = None
+                verified_full_replay = _verified_http_bridge_hard_owner_full_replay(
+                    session,
+                    status_request_state,
+                )
+                if verified_full_replay is not None:
+                    # Keep the verified full body and continuity metadata
+                    # intact until the retry helper performs the atomic owner
+                    # rebind. Pre-stripping the anchor here loses the proof.
                     await self._release_request_state_account_response_create_lease(status_request_state)
-                    status_request_state.excluded_account_ids.add(session.account.id)
-                    status_request_state.affinity_policy = replace(
-                        status_request_state.affinity_policy,
-                        reallocate_sticky=True,
-                    )
-                    status_request_state.request_text = safe_request_text
                     async with session.pending_lock:
                         if status_request_state not in session.pending_requests:
                             session.pending_requests.appendleft(status_request_state)
@@ -958,8 +955,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     retried = await self._retry_http_bridge_precreated_request(session)
                     if retried:
                         return
-                    session.upstream_turn_state = previous_upstream_turn_state
-                    session.downstream_turn_state = previous_downstream_turn_state
                     async with session.pending_lock:
                         if status_request_state in session.pending_requests:
                             session.pending_requests.remove(status_request_state)

@@ -1157,6 +1157,43 @@ async def _iter_sse_events(
         yield bytes(buffer).decode("utf-8", errors="replace")
 
 
+async def _stream_with_first_event_timeout(
+    stream: AsyncIterator[str],
+    timeout_seconds: float,
+) -> AsyncIterator[str]:
+    iterator = stream.__aiter__()
+    first_event_task = asyncio.ensure_future(iterator.__anext__())
+    try:
+        try:
+            done, _ = await asyncio.wait({first_event_task}, timeout=timeout_seconds)
+            if not done:
+                first_event_task.cancel()
+                try:
+                    await first_event_task
+                except asyncio.CancelledError:
+                    pass
+                raise StreamIdleTimeoutError()
+            first = await first_event_task
+        except StopAsyncIteration:
+            return
+        except asyncio.CancelledError:
+            if not first_event_task.done():
+                first_event_task.cancel()
+                try:
+                    await first_event_task
+                except asyncio.CancelledError:
+                    pass
+            raise
+
+        yield first
+        async for event in iterator:
+            yield event
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if callable(close):
+            await close()
+
+
 async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str | None]:
     try:
         return await resp.json(content_type=None), None
@@ -2705,6 +2742,13 @@ async def _stream_responses_with_session(
     )
     effective_connect_timeout = _effective_stream_timeout(settings.upstream_connect_timeout_seconds, "connect")
     effective_idle_timeout = _effective_stream_timeout(settings.stream_idle_timeout_seconds, "idle")
+    effective_first_event_timeout = min(
+        effective_idle_timeout,
+        _effective_stream_timeout(
+            getattr(settings, "stream_first_event_timeout_seconds", settings.stream_idle_timeout_seconds),
+            "idle",
+        ),
+    )
 
     seen_terminal = False
     status_code: int | None = None
@@ -3062,13 +3106,16 @@ async def _stream_responses_with_session(
             url=url,
             headers=upstream_headers,
         )
-        async for event_block in _stream_via_http(upstream_headers, timeout):
+        async for event_block in _stream_with_first_event_timeout(
+            _stream_via_http(upstream_headers, timeout),
+            effective_first_event_timeout,
+        ):
             yield event_block
 
     try:
         if transport == "websocket":
             try:
-                async for event_block in _stream_responses_via_websocket(
+                websocket_stream = _stream_responses_via_websocket(
                     payload_dict=payload_dict,
                     url=url,
                     headers=upstream_headers,
@@ -3083,6 +3130,10 @@ async def _stream_responses_with_session(
                     codex_client=codex_client,
                     route_trace=route_trace,
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                )
+                async for event_block in _stream_with_first_event_timeout(
+                    websocket_stream,
+                    effective_first_event_timeout,
                 ):
                     if status_code is None:
                         status_code = 101
@@ -3113,21 +3164,32 @@ async def _stream_responses_with_session(
                     )
                     return
 
-                async for event_block in _stream_via_http_after_websocket_rejection(
+                fallback_stream = _stream_via_http_after_websocket_rejection(
                     rejection_status=exc.status,
                     rejection_message=str(exc),
+                )
+                async for event_block in _stream_with_first_event_timeout(
+                    fallback_stream,
+                    effective_first_event_timeout,
                 ):
                     yield event_block
             except CodexTransportError as exc:
                 if not _should_fallback_to_http_after_websocket_status(transport_mode, exc.status_code):
                     raise
-                async for event_block in _stream_via_http_after_websocket_rejection(
+                fallback_stream = _stream_via_http_after_websocket_rejection(
                     rejection_status=exc.status_code,
                     rejection_message=str(exc),
+                )
+                async for event_block in _stream_with_first_event_timeout(
+                    fallback_stream,
+                    effective_first_event_timeout,
                 ):
                     yield event_block
         else:
-            async for event_block in _stream_via_http(upstream_headers, timeout):
+            async for event_block in _stream_with_first_event_timeout(
+                _stream_via_http(upstream_headers, timeout),
+                effective_first_event_timeout,
+            ):
                 yield event_block
     except ProxyResponseError as exc:
         status_code = exc.status_code

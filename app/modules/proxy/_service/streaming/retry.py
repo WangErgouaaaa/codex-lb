@@ -16,7 +16,7 @@ from app.core.balancer import failover_decision
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import ProxyResponseError, _resolve_stream_transport, pop_stream_timeout_overrides
 from app.core.errors import openai_error, response_failed_event
-from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
+from app.core.openai.requests import ResponsesRequest
 from app.core.resilience.network_recovery import (
     NetworkRecoveryDecision,
     ProcessNetworkRecovery,
@@ -49,9 +49,6 @@ from app.modules.proxy._service.support import (
     _TransientStreamError,
     _WebSocketUpstreamControl,
 )
-from app.modules.proxy._service.websocket.helpers import (
-    _websocket_input_items_are_self_contained_fresh_replay,
-)
 from app.modules.proxy.affinity import (
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
@@ -76,6 +73,10 @@ from app.modules.proxy.helpers import (
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.replay_safety import (
+    responses_input_suffix_retains_prior_output,
+    responses_payload_is_account_neutral_fresh_replay,
+)
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -142,19 +143,16 @@ def _verified_cross_transport_fresh_replay(
     """Return an unanchored body only when local WS continuity proves its prefix."""
     previous_response_id = payload.previous_response_id
     input_value = payload.input
-    if previous_response_id is None or not isinstance(input_value, list):
-        return None
-    if extract_input_file_ids(input_value):
-        return None
-    input_items = cast(list[Any], input_value)
-    if not _websocket_input_items_are_self_contained_fresh_replay(input_items):
+    if not isinstance(input_value, list):
         return None
     session_id = _owner_lookup_session_id_from_headers(headers)
     if session_id is None:
         return None
     api_key_id = api_key.id if api_key is not None else None
     continuity_state = proxy._websocket_continuity_index.get((session_id, api_key_id))
-    if continuity_state is None or continuity_state.last_completed_response_id != previous_response_id:
+    if previous_response_id is not None and (
+        continuity_state is None or continuity_state.last_completed_response_id != previous_response_id
+    ):
         # HTTP and WebSocket entry points synthesize different turn-state
         # headers. The response id remains globally specific within the API-key
         # scope, so use its unique retained state when the direct key differs.
@@ -166,13 +164,23 @@ def _verified_cross_transport_fresh_replay(
         if len(matching_states) != 1:
             return None
         continuity_state = matching_states[0]
+    if continuity_state is None:
+        return None
     if not _facade()._input_prefix_matches_stored_context(
         input_value,
         stored_count=continuity_state.last_completed_input_count,
         stored_fingerprint=continuity_state.last_completed_input_prefix_fingerprint,
     ):
         return None
-    return payload.model_copy(update={"previous_response_id": None})
+    fresh_payload = payload.model_copy(update={"previous_response_id": None})
+    if not responses_input_suffix_retains_prior_output(
+        cast(list[Any], input_value),
+        stored_count=continuity_state.last_completed_input_count,
+    ):
+        return None
+    if not responses_payload_is_account_neutral_fresh_replay(fresh_payload.to_payload()):
+        return None
+    return fresh_payload
 
 
 def _effective_http_downstream_transport_policy(
@@ -268,6 +276,7 @@ class _StreamingRetryMixin:
         rewritten_file_account_id: str | None = None,
         required_preferred_account_id: str | None = None,
         upstream_stream_transport_override: str | None = None,
+        continuity_turn_state: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
@@ -399,6 +408,16 @@ class _StreamingRetryMixin:
         estimated_lease_tokens = _facade()._estimated_lease_tokens_from_request_usage_budget(
             estimate_api_key_request_usage(payload)
         )
+        continuity_state = (
+            proxy._websocket_continuity_state_for_request(
+                headers,
+                api_key=api_key,
+                codex_session_affinity=True,
+                synthesized_turn_state=continuity_turn_state,
+            )
+            if codex_session_affinity
+            else None
+        )
         verified_fresh_replay_payload = _verified_cross_transport_fresh_replay(
             proxy,
             payload=payload,
@@ -513,22 +532,40 @@ class _StreamingRetryMixin:
             settled = await _settle_stream_usage_before_pending_penalty(settlement)
 
         def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
-            # Only a proxy-injected owner anchor with locally verified full
-            # input may move; the failed owner stays excluded so sticky
-            # selection cannot immediately loop back to it.
-            nonlocal affinity, payload, preferred_account_id, require_preferred_account, verified_fresh_replay_payload
-            if not (
-                require_preferred_account
-                and preferred_account_id == account_id
-                and verified_fresh_replay_payload is not None
-            ):
+            # A locally verified full replay may leave either an explicitly
+            # resolved owner or a CODEX_SESSION hard-sticky owner. The failed
+            # owner stays excluded so sticky selection cannot loop back to it.
+            nonlocal affinity, headers, payload, preferred_account_id, require_preferred_account
+            nonlocal verified_fresh_replay_payload
+            if verified_fresh_replay_payload is None:
+                return False
+            if require_preferred_account:
+                if preferred_account_id != account_id:
+                    return False
+            elif affinity.kind != StickySessionKind.CODEX_SESSION:
                 return False
             payload = verified_fresh_replay_payload
             verified_fresh_replay_payload = None
             excluded_account_ids.add(account_id)
             preferred_account_id = None
             require_preferred_account = False
-            affinity = replace(affinity, reallocate_sticky=True)
+            headers = {key: value for key, value in headers.items() if key.lower() != "x-codex-turn-state"}
+            # Once the body is proven account-neutral, the failed account's
+            # turn-state is no longer a valid routing constraint. Re-derive
+            # affinity from the remaining headers (normally the soft session
+            # header) so selection can move and rebind that soft mapping.
+            affinity = replace(
+                _sticky_key_for_responses_request(
+                    payload,
+                    headers,
+                    codex_session_affinity=codex_session_affinity,
+                    openai_cache_affinity=openai_cache_affinity,
+                    openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+                    sticky_threads_enabled=settings.sticky_threads_enabled,
+                    api_key=api_key,
+                ),
+                reallocate_sticky=True,
+            )
             logger.info(
                 "cross_transport_verified_fresh_replay request_id=%s outcome=%s account_id=%s",
                 request_id,
@@ -1185,15 +1222,9 @@ class _StreamingRetryMixin:
                         and preferred_account_id is not None
                         and verified_fresh_replay_payload is not None
                     ):
-                        excluded_account_ids.add(preferred_account_id)
-                        payload = verified_fresh_replay_payload
-                        verified_fresh_replay_payload = None
-                        preferred_account_id = None
-                        require_preferred_account = False
-                        affinity = replace(affinity, reallocate_sticky=True)
-                        logger.info(
-                            "cross_transport_verified_fresh_replay request_id=%s outcome=owner_unavailable",
-                            request_id,
+                        _move_verified_fresh_replay_from_owner(
+                            account_id=preferred_account_id,
+                            outcome="owner_unavailable",
                         )
                         continue
                     await _drain_pending_post_refresh_penalty_on_terminal(settlement)
@@ -1356,15 +1387,9 @@ class _StreamingRetryMixin:
                     and account.id != preferred_account_id
                 ):
                     if verified_fresh_replay_payload is not None:
-                        payload = verified_fresh_replay_payload
-                        verified_fresh_replay_payload = None
-                        excluded_account_ids.add(preferred_account_id)
-                        preferred_account_id = None
-                        require_preferred_account = False
-                        affinity = replace(affinity, reallocate_sticky=True)
-                        logger.info(
-                            "cross_transport_verified_fresh_replay request_id=%s outcome=alternate_selected",
-                            request_id,
+                        _move_verified_fresh_replay_from_owner(
+                            account_id=preferred_account_id,
+                            outcome="alternate_selected",
                         )
                     else:
                         error_code, message = _cutover_owner_unavailable_fields(
@@ -1740,6 +1765,7 @@ class _StreamingRetryMixin:
                                     )
                                     else preferred_account_id
                                 ),
+                                continuity_state=continuity_state,
                                 tool_call_dedupe=tool_call_dedupe,
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):

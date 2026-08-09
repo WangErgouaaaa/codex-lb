@@ -380,9 +380,6 @@ from app.modules.proxy._service.response_create import (
     _enforce_response_create_size_limit as _enforce_response_create_size_limit,
 )
 from app.modules.proxy._service.response_create import (
-    _fingerprint_input_items as _fingerprint_input_items,
-)
-from app.modules.proxy._service.response_create import (
     _function_call_output_call_ids as _function_call_output_call_ids,
 )
 from app.modules.proxy._service.response_create import (
@@ -544,6 +541,7 @@ from app.modules.proxy._service.support import (
     _event_type_from_payload,  # noqa: F401
     _FilePinEntry,
     _finalize_ttft_reasoning_deltas,  # noqa: F401
+    _fingerprint_input_items,
     _http_error_status_from_payload,  # noqa: F401
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,

@@ -224,6 +224,39 @@ def test_schema_migration_contract_matches_after_upgrade(tmp_path: Path) -> None
     assert check_schema_drift(url) == ()
 
 
+def test_proxy_pool_overflow_policy_migration_round_trips(tmp_path: Path) -> None:
+    db_path = tmp_path / "proxy-pool-overflow.db"
+    url = _db_url(db_path)
+    parent_revision = "20260727_000000_add_api_key_assignment_generation"
+    target_revision = "20260803_000000_add_proxy_pool_overflow_policy"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    engine = create_engine(to_sync_database_url(url), future=True)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO proxy_pools (id, name, is_active) VALUES ('legacy_pool', 'Legacy', 1)")
+            )
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("proxy_pools")}
+            assert {"routing_strategy", "overflow_threshold"} <= columns
+            row = connection.execute(
+                text("SELECT routing_strategy, overflow_threshold FROM proxy_pools WHERE id = 'legacy_pool'")
+            ).one()
+            assert tuple(row) == ("failover", None)
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("proxy_pools")}
+            assert "routing_strategy" not in columns
+            assert "overflow_threshold" not in columns
+    finally:
+        engine.dispose()
+
+
 def test_accounts_codex_installation_id_migration_backfills_existing_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "codex-installation-id.db"
     url = _db_url(db_path)

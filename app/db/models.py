@@ -479,6 +479,13 @@ class ProxyPool(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    routing_strategy: Mapped[str] = mapped_column(
+        String,
+        default="failover",
+        server_default=text("'failover'"),
+        nullable=False,
+    )
+    overflow_threshold: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

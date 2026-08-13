@@ -1920,11 +1920,18 @@ class _HTTPBridgeStreamingMixin:
             is complete for its own conversation. Requiring assistant turns
             keeps a trimmed follow-up (anchor + new message only) from being
             misclassified as a full resend.
+
+            The continuation must be owner-bound through *some* anchor: the
+            payload ``previous_response_id``, or the durable session row
+            resolved from a hard session header. Codex HTTP/SSE continuations
+            carry the anchor in the header, never in the payload, so requiring
+            a payload anchor would leave every codex resend dead on arrival.
+            A plain fresh request with a long input is not a continuation and
+            must not be replayed as one.
             """
             if (
                 forwarded_request
                 or rewritten_file_account_id is not None
-                or effective_payload.previous_response_id is None
                 or not _service_get_settings().http_bridge_owner_unavailable_fresh_resend_enabled
             ):
                 return False
@@ -1933,9 +1940,26 @@ class _HTTPBridgeStreamingMixin:
             input_items = payload.input if isinstance(payload.input, list) else None
             if not input_items:
                 return False
-            return any(
+            if not any(
                 isinstance(item, dict) and item.get("role") == "assistant"
                 for item in input_items
+            ):
+                return False
+            if effective_payload.previous_response_id is not None:
+                return True
+            # Anchorless codex HTTP/SSE continuation bound through a hard
+            # session header. The account-neutral classifier runs first in
+            # the official replay path; reuse its cached verdict instead of
+            # calling it again. A cached ``False`` (owner-scoped input such as
+            # conversation/file state) stays fail-closed; ``None`` means the
+            # durable proof never reached classification (e.g. the anchor was
+            # cleared), so the client's own full body is the only context and
+            # the resend is the intended escape.
+            return (
+                durable_lookup is not None
+                and durable_lookup.account_id is not None
+                and bridge_session_key.strength == "hard"
+                and durable_full_resend_is_account_neutral is not False
             )
 
         def checkpoint_replay_owner_unavailable_allowed() -> bool:

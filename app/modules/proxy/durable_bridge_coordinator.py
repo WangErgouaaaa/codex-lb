@@ -16,6 +16,7 @@ from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    DurableBridgeCheckpointSnapshot,
     DurableBridgeOperationEventInput,
     DurableBridgeOperationSnapshot,
     DurableBridgeRecoveryAttemptSnapshot,
@@ -563,6 +564,38 @@ class DurableBridgeSessionCoordinator:
                 max_turns=max_turns,
                 max_bytes=max_bytes,
             )
+
+    async def save_checkpoint(
+        self,
+        *,
+        response_id: str,
+        session_id: str,
+        api_key_scope: str,
+        account_id: str | None,
+        model: str | None,
+        input_json: str,
+        output_json: str | None,
+        input_item_count: int,
+        input_fingerprint: str | None,
+        ttl_seconds: float | None = None,
+    ) -> DurableBridgeCheckpointSnapshot:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).save_checkpoint(
+                response_id=response_id,
+                session_id=session_id,
+                api_key_scope=api_key_scope,
+                account_id=account_id,
+                model=model,
+                input_json=input_json,
+                output_json=output_json,
+                input_item_count=input_item_count,
+                input_fingerprint=input_fingerprint,
+                ttl_seconds=ttl_seconds,
+            )
+
+    async def get_checkpoint(self, *, response_id: str) -> DurableBridgeCheckpointSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_checkpoint(response_id=response_id)
 
     async def purge_operation_spool(self, *, cutoff: datetime, batch_size: int = 500) -> int:
         async with self._session() as session:

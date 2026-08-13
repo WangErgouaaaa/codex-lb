@@ -1917,6 +1917,33 @@ class _HTTPBridgeStreamingMixin:
                 for item in input_items
             )
 
+        def checkpoint_replay_owner_unavailable_allowed() -> bool:
+            """Owner unavailable and this is a trimmed follow-up (anchor + new
+            user message only, no assistant turns): neither the official
+            account-neutral replay nor the fresh-resend fallback applies. The
+            server can still rebuild the full conversation from the canonical
+            checkpoint stored when the parent response completed, then replay
+            anchor-free on another account.
+            """
+            if (
+                forwarded_request
+                or rewritten_file_account_id is not None
+                or effective_payload.previous_response_id is None
+                or not getattr(
+                    _service_get_settings(), "http_bridge_checkpoint_replay_enabled", False
+                )
+            ):
+                return False
+            if payload_looks_like_full_resend:
+                return False
+            input_items = payload.input if isinstance(payload.input, list) else None
+            if not input_items:
+                return False
+            return not any(
+                isinstance(item, dict) and item.get("role") == "assistant"
+                for item in input_items
+            )
+
         def switch_to_account_neutral_replay() -> None:
             nonlocal account_neutral_recovery
             nonlocal affinity
@@ -2125,6 +2152,67 @@ class _HTTPBridgeStreamingMixin:
                         )
                         switch_to_account_neutral_replay()
                         continue
+                    if (
+                        _http_bridge_is_previous_response_owner_unavailable(exc)
+                        and checkpoint_replay_owner_unavailable_allowed()
+                    ):
+                        # Trimmed follow-up whose owner account is exhausted.
+                        # Rebuild the full conversation from the canonical
+                        # checkpoint stored at parent completion, then resend
+                        # anchor-free on another account. At-least-once by
+                        # design; the owner is excluded so the retry cannot
+                        # land on it again.
+                        checkpoint = await self._durable_bridge.get_checkpoint(
+                            response_id=effective_payload.previous_response_id
+                        )
+                        if checkpoint is not None:
+                            _log_http_bridge_event(
+                                "owner_unavailable_checkpoint_replay",
+                                bridge_session_key,
+                                account_id=request_state.preferred_account_id,
+                                model=payload.model,
+                                detail=(
+                                    f"outcome=checkpoint_rehydrated_resend "
+                                    f"stored_items={checkpoint.input_item_count}"
+                                ),
+                                cache_key_family=bridge_session_key.affinity_kind,
+                                model_class=_extract_model_class(payload.model)
+                                if payload.model
+                                else None,
+                            )
+                            try:
+                                stored_input = json.loads(checkpoint.input_json)
+                                stored_output = (
+                                    json.loads(checkpoint.output_json)
+                                    if checkpoint.output_json
+                                    else []
+                                )
+                            except (TypeError, json.JSONDecodeError):
+                                logger.warning(
+                                    "Checkpoint payload malformed response_id=%s; "
+                                    "failing closed to owner-unavailable",
+                                    effective_payload.previous_response_id,
+                                )
+                                raise
+                            rehydrated_input = list(stored_input) + list(stored_output)
+                            client_input = payload.input if isinstance(payload.input, list) else []
+                            # The trimmed follow-up's own user message(s) are
+                            # appended after the stored conversation.
+                            while rehydrated_input and client_input and rehydrated_input[-1] == client_input[0]:
+                                client_input = client_input[1:]
+                            rehydrated_input = rehydrated_input + list(client_input)
+                            durable_full_resend_fresh_payload = (
+                                _http_bridge_payload_without_previous_response_id(
+                                    untrimmed_effective_payload
+                                ).model_copy(update={"input": rehydrated_input})
+                            )
+                            switch_to_account_neutral_replay()
+                            continue
+                        logger.info(
+                            "Checkpoint missing response_id=%s; failing closed to "
+                            "owner-unavailable 502",
+                            effective_payload.previous_response_id,
+                        )
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
                         error_code=exc_code,
@@ -2863,6 +2951,12 @@ class _HTTPBridgeStreamingMixin:
                 initial_handoff_session,
                 request_scope_id=initial_handoff_scope_id,
             )
+        # Canonical continuation checkpoint: carry the full (pre-trim) client
+        # input on the request state so response.completed can persist an
+        # account-neutral checkpoint keyed by the new response id.
+        untrimmed_input = untrimmed_effective_payload.input
+        if isinstance(untrimmed_input, list):
+            request_state.checkpoint_input_items = list(untrimmed_input)
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,

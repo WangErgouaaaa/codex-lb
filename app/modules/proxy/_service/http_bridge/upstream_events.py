@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import replace
@@ -68,6 +69,8 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
+from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope
+from app.modules.proxy.replay_safety import project_responses_input_for_account_neutral_fresh_replay
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
     _await_cancelled_task,
@@ -1541,6 +1544,119 @@ class _HTTPBridgeUpstreamEventsMixin:
                     except asyncio.QueueFull:
                         pass
 
+    async def _persist_http_bridge_checkpoint(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_state: "_WebSocketRequestState",
+        *,
+        response_id: str,
+    ) -> None:
+        """Persist a canonical account-neutral continuation checkpoint.
+
+        Called on ``response.completed`` for requests that carried a full
+        (pre-trim) client input. The checkpoint stores the complete input plus
+        the completed output items, projected to account-neutral form, keyed by
+        the exact response id so a later compact follow-up can be rebuilt
+        anchor-free on another account.
+        """
+        settings = _service_get_settings()
+        if not getattr(settings, "http_bridge_checkpoint_replay_enabled", False):
+            return
+        input_items = request_state.checkpoint_input_items
+        if not input_items:
+            return
+        output_items = request_state.checkpoint_output_items or []
+        try:
+            # Rebuild the full continuation context for this completed
+            # response: unanchored first turns and client full resends carry
+            # their complete history directly; a trimmed follow-up inherits
+            # the parent checkpoint and appends this turn's output, forming a
+            # rolling checkpoint chain keyed by each response id.
+            if request_state.previous_response_id is not None:
+                parent_checkpoint = await self._durable_bridge.get_checkpoint(
+                    response_id=request_state.previous_response_id
+                )
+                if parent_checkpoint is not None:
+                    parent_input = json.loads(parent_checkpoint.input_json)
+                    parent_output = (
+                        json.loads(parent_checkpoint.output_json) if parent_checkpoint.output_json else []
+                    )
+                    inherited = list(parent_input) + list(parent_output)
+                    # Drop a client-carried tail duplicate (the client may
+                    # echo the final assistant/user item of the prior turn).
+                    while inherited and input_items and inherited[-1] == input_items[0]:
+                        input_items = input_items[1:]
+                    input_items = inherited + list(input_items)
+                elif not any(
+                    isinstance(item, dict) and item.get("role") == "assistant" for item in input_items
+                ):
+                    # No parent checkpoint and no assistant turns: the client
+                    # is a delta-only follow-up whose history is unrecoverable.
+                    # Do not publish an incomplete checkpoint.
+                    logger.info(
+                        "Skipping checkpoint response_id=%s previous_response_id=%s: "
+                        "no parent checkpoint and no assistant turns",
+                        response_id,
+                        request_state.previous_response_id,
+                    )
+                    return
+        except Exception:
+            logger.warning(
+                "Checkpoint parent merge failed; skipping checkpoint response_id=%s",
+                response_id,
+                exc_info=True,
+            )
+            return
+        try:
+            input_projection = project_responses_input_for_account_neutral_fresh_replay(
+                input_items,
+                stored_count=len(input_items),
+            )
+            output_projection = (
+                project_responses_input_for_account_neutral_fresh_replay(
+                    output_items,
+                    stored_count=len(output_items),
+                )
+                if output_items
+                else None
+            )
+        except Exception:
+            logger.warning(
+                "Checkpoint projection failed; skipping checkpoint response_id=%s",
+                response_id,
+                exc_info=True,
+            )
+            return
+        if input_projection is None:
+            logger.warning(
+                "Checkpoint input projection returned None; skipping checkpoint response_id=%s",
+                response_id,
+            )
+            return
+        try:
+            await self._durable_bridge.save_checkpoint(
+                response_id=response_id,
+                session_id=session.durable_session_id or "",
+                api_key_scope=durable_bridge_api_key_scope(session.key.api_key_id),
+                account_id=session.account.id if session.account is not None else None,
+                model=request_state.model,
+                input_json=json.dumps(input_projection.input_items, ensure_ascii=False),
+                output_json=(
+                    json.dumps(output_projection.input_items, ensure_ascii=False)
+                    if output_projection is not None
+                    else None
+                ),
+                input_item_count=input_projection.stored_prefix_count,
+                input_fingerprint=request_state.input_full_fingerprint,
+                ttl_seconds=getattr(settings, "http_bridge_checkpoint_ttl_seconds", None),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist HTTP bridge checkpoint response_id=%s",
+                response_id,
+                exc_info=True,
+            )
+
     async def _process_parsed_http_bridge_upstream_event(
         self: Any,
         session: "_HTTPBridgeSession",
@@ -1641,6 +1757,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type=event_type,
                     payload=payload,
                 )
+                if event_type == "response.output_item.done":
+                    done_item = payload.get("item") if isinstance(payload, dict) else None
+                    if isinstance(done_item, dict):
+                        if matched_request_state.checkpoint_output_items is None:
+                            matched_request_state.checkpoint_output_items = []
+                        matched_request_state.checkpoint_output_items.append(done_item)
                 completed_tool_call = _response_output_item_done_tool_call(payload)
                 if completed_tool_call is not None:
                     completed_call_id, completed_call_type = completed_tool_call
@@ -2276,6 +2398,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                     matched_request_state.input_full_fingerprint if matched_request_state.input_item_count > 0 else None
                 ),
                 pending_tool_calls=_durable_pending_tool_call_manifest(matched_request_state, payload),
+            )
+            await self._persist_http_bridge_checkpoint(
+                session,
+                matched_request_state,
+                response_id=response_id,
             )
             if not alias_registered and is_http_bridge_account_neutral_replay(
                 kind=session.key.affinity_kind,

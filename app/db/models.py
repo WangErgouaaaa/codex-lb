@@ -2070,6 +2070,52 @@ class HttpBridgeRetryCircuit(Base):
     updated_at_epoch: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class HttpBridgeCheckpointRecord(Base):
+    """Canonical account-neutral continuation checkpoint for an HTTP bridge
+    response.
+
+    Written when a response completes with a known ``response_id`` so a later
+    compact follow-up can be replayed anchor-free on another account even when
+    the durable operation ledger never recorded the unanchored first turn.
+    """
+
+    __tablename__ = "http_bridge_checkpoints"
+
+    response_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("http_bridge_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    input_json: Mapped[str] = mapped_column(Text, nullable=False)
+    output_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_item_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=func.now(),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("idx_http_bridge_checkpoints_session", "session_id", "created_at"),
+        Index("idx_http_bridge_checkpoints_expires", "expires_at"),
+    )
+
+
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)

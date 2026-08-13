@@ -345,6 +345,12 @@ class Settings(BaseSettings):
     # request anchor-free on a different account. At-least-once: the original
     # upstream attempt may have been accepted, so a replay can double-consume.
     http_bridge_owner_unavailable_fresh_resend_enabled: bool = True
+    # Canonical account-neutral continuation checkpoints: written when a
+    # response completes, read when a compact follow-up's owner account is
+    # unavailable and the client did not carry full history. The checkpoint
+    # TTL bounds how long an expired owner can be replayed on a new account.
+    http_bridge_checkpoint_replay_enabled: bool = True
+    http_bridge_checkpoint_ttl_seconds: float = Field(default=7 * 24 * 60 * 60, ge=0)
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None

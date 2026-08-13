@@ -1933,16 +1933,38 @@ class _HTTPBridgeStreamingMixin:
                     _service_get_settings(), "http_bridge_checkpoint_replay_enabled", False
                 )
             ):
+                logger.info(
+                    "checkpoint_replay_gate_1 response_id=%s forwarded=%s rewritten_file=%s "
+                    "enabled=%s",
+                    effective_payload.previous_response_id,
+                    forwarded_request,
+                    rewritten_file_account_id,
+                    getattr(_service_get_settings(), "http_bridge_checkpoint_replay_enabled", None),
+                )
                 return False
             if payload_looks_like_full_resend:
+                logger.info(
+                    "checkpoint_replay_gate_2 response_id=%s looks_like_full_resend=True",
+                    effective_payload.previous_response_id,
+                )
                 return False
             input_items = payload.input if isinstance(payload.input, list) else None
             if not input_items:
+                logger.info(
+                    "checkpoint_replay_gate_3 response_id=%s input_not_list",
+                    effective_payload.previous_response_id,
+                )
                 return False
-            return not any(
+            if any(
                 isinstance(item, dict) and item.get("role") == "assistant"
                 for item in input_items
-            )
+            ):
+                logger.info(
+                    "checkpoint_replay_gate_4 response_id=%s has_assistant_turns",
+                    effective_payload.previous_response_id,
+                )
+                return False
+            return True
 
         def switch_to_account_neutral_replay() -> None:
             nonlocal account_neutral_recovery

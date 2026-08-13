@@ -340,6 +340,11 @@ class Settings(BaseSettings):
         "server_anchored_replay_once",
         "server_indefinite_recovery",
     ] = "fail_closed"
+    # When the previous-response owner account is unavailable (quota/rate
+    # limited) and the client payload carries its full local history, retry the
+    # request anchor-free on a different account. At-least-once: the original
+    # upstream attempt may have been accepted, so a replay can double-consume.
+    http_bridge_owner_unavailable_fresh_resend_enabled: bool = True
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None

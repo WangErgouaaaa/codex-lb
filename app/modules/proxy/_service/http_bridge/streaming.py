@@ -1890,6 +1890,33 @@ class _HTTPBridgeStreamingMixin:
                 and durable_full_resend_allows_account_neutral_replay()
             )
 
+        def fresh_resend_owner_unavailable_replay_allowed() -> bool:
+            """Owner unavailable and the client carried its full local history:
+            fall back to an anchor-free resend without the durable fingerprint
+            proof. The stored-context proof can legitimately fail when the
+            durable row records a larger input than the client resends (for
+            example a parallel/unrelated request), even though the client body
+            is complete for its own conversation. Requiring assistant turns
+            keeps a trimmed follow-up (anchor + new message only) from being
+            misclassified as a full resend.
+            """
+            if (
+                forwarded_request
+                or rewritten_file_account_id is not None
+                or effective_payload.previous_response_id is None
+                or not _service_get_settings().http_bridge_owner_unavailable_fresh_resend_enabled
+            ):
+                return False
+            if not payload_looks_like_full_resend:
+                return False
+            input_items = payload.input if isinstance(payload.input, list) else None
+            if not input_items:
+                return False
+            return any(
+                isinstance(item, dict) and item.get("role") == "assistant"
+                for item in input_items
+            )
+
         def switch_to_account_neutral_replay() -> None:
             nonlocal account_neutral_recovery
             nonlocal affinity
@@ -2074,6 +2101,30 @@ class _HTTPBridgeStreamingMixin:
                 )
             except ProxyResponseError as exc:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
+                    if _http_bridge_is_previous_response_owner_unavailable(
+                        exc
+                    ) and fresh_resend_owner_unavailable_replay_allowed():
+                        # The client sent its full local history but the owner
+                        # account is exhausted. Resend the body anchor-free on
+                        # another account instead of failing with the owner
+                        # unavailable 502. At-least-once by design; the owner is
+                        # excluded so the retry cannot land on it again.
+                        _log_http_bridge_event(
+                            "owner_unavailable_fresh_resend",
+                            bridge_session_key,
+                            account_id=request_state.preferred_account_id,
+                            model=payload.model,
+                            detail="outcome=plaintext_full_resend_without_anchor",
+                            cache_key_family=bridge_session_key.affinity_kind,
+                            model_class=_extract_model_class(payload.model)
+                            if payload.model
+                            else None,
+                        )
+                        durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
+                            untrimmed_effective_payload
+                        )
+                        switch_to_account_neutral_replay()
+                        continue
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(
                         error_code=exc_code,

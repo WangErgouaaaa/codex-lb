@@ -1656,6 +1656,24 @@ class _HTTPBridgeUpstreamEventsMixin:
                 response_id,
                 exc_info=True,
             )
+            return
+        # Advance the session's canonical checkpoint pointer so an
+        # owner-unavailable continuation can still rehydrate even after the
+        # upstream anchor is cleared (stuck/eventless timeout). Best-effort:
+        # a pointer write failure must not fail the completed response.
+        if session.durable_session_id is not None and response_id:
+            try:
+                await self._durable_bridge.set_session_checkpoint_pointer(
+                    session_id=session.durable_session_id,
+                    response_id=response_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to advance session checkpoint pointer session_id=%s response_id=%s",
+                    session.durable_session_id,
+                    response_id,
+                    exc_info=True,
+                )
 
     async def _process_parsed_http_bridge_upstream_event(
         self: Any,

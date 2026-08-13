@@ -498,6 +498,27 @@ def _http_bridge_dead_owner_previous_response_id(request_state: _WebSocketReques
     return request_state.previous_response_id or _websocket_downstream_response_id(request_state)
 
 
+def _http_bridge_checkpoint_lookup_key(
+    request_state: _WebSocketRequestState,
+    *,
+    durable_lookup: DurableBridgeLookup | None,
+) -> str | None:
+    """Resolve the canonical checkpoint key for an owner-unavailable replay.
+
+    Precedence: the request's own previous-response anchor, then the durable
+    session's latest response id, then the session's checkpoint pointer (the
+    last response id with a fully persisted account-neutral checkpoint, which
+    survives ``clear_latest_response_anchor``).
+    """
+    if request_state.previous_response_id is not None:
+        return request_state.previous_response_id
+    if durable_lookup is not None:
+        if durable_lookup.latest_response_id is not None:
+            return durable_lookup.latest_response_id
+        return durable_lookup.latest_checkpoint_response_id
+    return None
+
+
 def _http_bridge_durable_owner_is_dead(
     lookup: DurableBridgeLookup,
     *,
@@ -1918,50 +1939,58 @@ class _HTTPBridgeStreamingMixin:
             )
 
         def checkpoint_replay_owner_unavailable_allowed() -> bool:
-            """Owner unavailable and this is a trimmed follow-up (anchor + new
-            user message only, no assistant turns): neither the official
+            """Owner unavailable and this request has no recoverable full
+            history of its own (no assistant turns): neither the official
             account-neutral replay nor the fresh-resend fallback applies. The
             server can still rebuild the full conversation from the canonical
             checkpoint stored when the parent response completed, then replay
             anchor-free on another account.
+
+            The checkpoint key is resolved through the durable session, not the
+            payload: codex HTTP/SSE continuations carry no
+            ``previous_response_id`` (session header affinity instead), and a
+            stuck/eventless timeout may have cleared the durable
+            ``latest_response_id``. The session's ``latest_checkpoint_response_id``
+            pointer survives both, so it is the last resort key.
             """
             if (
                 forwarded_request
                 or rewritten_file_account_id is not None
-                or effective_payload.previous_response_id is None
                 or not getattr(
                     _service_get_settings(), "http_bridge_checkpoint_replay_enabled", False
                 )
             ):
                 logger.info(
-                    "checkpoint_replay_gate_1 response_id=%s forwarded=%s rewritten_file=%s "
-                    "enabled=%s",
-                    effective_payload.previous_response_id,
+                    "checkpoint_replay_gate_1 forwarded=%s rewritten_file=%s enabled=%s",
                     forwarded_request,
                     rewritten_file_account_id,
                     getattr(_service_get_settings(), "http_bridge_checkpoint_replay_enabled", None),
                 )
                 return False
             if payload_looks_like_full_resend:
-                logger.info(
-                    "checkpoint_replay_gate_2 response_id=%s looks_like_full_resend=True",
-                    effective_payload.previous_response_id,
-                )
+                logger.info("checkpoint_replay_gate_2 looks_like_full_resend=True")
                 return False
             input_items = payload.input if isinstance(payload.input, list) else None
             if not input_items:
-                logger.info(
-                    "checkpoint_replay_gate_3 response_id=%s input_not_list",
-                    effective_payload.previous_response_id,
-                )
+                logger.info("checkpoint_replay_gate_3 input_not_list")
                 return False
             if any(
                 isinstance(item, dict) and item.get("role") == "assistant"
                 for item in input_items
             ):
+                logger.info("checkpoint_replay_gate_4 has_assistant_turns")
+                return False
+            checkpoint_key = _http_bridge_checkpoint_lookup_key(
+                request_state,
+                durable_lookup=durable_lookup,
+            )
+            if checkpoint_key is None:
                 logger.info(
-                    "checkpoint_replay_gate_4 response_id=%s has_assistant_turns",
+                    "checkpoint_replay_gate_5 no_checkpoint_key "
+                    "payload_anchor=%s durable_anchor=%s pointer=%s",
                     effective_payload.previous_response_id,
+                    durable_lookup.latest_response_id if durable_lookup is not None else None,
+                    durable_lookup.latest_checkpoint_response_id if durable_lookup is not None else None,
                 )
                 return False
             return True
@@ -2184,8 +2213,16 @@ class _HTTPBridgeStreamingMixin:
                         # anchor-free on another account. At-least-once by
                         # design; the owner is excluded so the retry cannot
                         # land on it again.
-                        checkpoint = await self._durable_bridge.get_checkpoint(
-                            response_id=effective_payload.previous_response_id
+                        checkpoint_response_id = _http_bridge_checkpoint_lookup_key(
+                            request_state,
+                            durable_lookup=durable_lookup,
+                        )
+                        checkpoint = (
+                            await self._durable_bridge.get_checkpoint(
+                                response_id=checkpoint_response_id
+                            )
+                            if checkpoint_response_id is not None
+                            else None
                         )
                         if checkpoint is not None:
                             _log_http_bridge_event(

@@ -192,14 +192,70 @@ async def test_checkpoint_repository_scoped(coordinator: DurableBridgeSessionCoo
         assert loaded is not None
 
 
-def test_checkpoint_replay_predicate_shape() -> None:
-    """The owner-unavailable checkpoint replay must be consultable on the
-    http_bridge streaming path; the predicate source lives in streaming.py."""
-    import app.modules.proxy._service.http_bridge.streaming as streaming_module
+def _request_state(**overrides: object) -> object:
+    from app.modules.proxy._service.support import _WebSocketRequestState
 
-    source = inspect.getsource(streaming_module)
-    assert "def checkpoint_replay_owner_unavailable_allowed" in source
-    assert "owner_unavailable_checkpoint_replay" in source
+    defaults = dict(
+        request_id="req-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    defaults.update(overrides)
+    return _WebSocketRequestState(**defaults)
+
+
+def test_checkpoint_lookup_key_resolution_order() -> None:
+    """Key precedence: payload anchor, durable latest response, checkpoint
+    pointer. Codex HTTP/SSE continuations carry no payload anchor and the
+    durable anchor may be cleared by a stuck timeout; the pointer is the last
+    resort that survives both."""
+    from app.modules.proxy._service.http_bridge.streaming import _http_bridge_checkpoint_lookup_key
+    from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
+
+    # 1. payload anchor wins
+    rs = _request_state(previous_response_id="resp_payload")
+    assert _http_bridge_checkpoint_lookup_key(rs, durable_lookup=None) == "resp_payload"
+
+    # 2. no payload anchor -> durable latest response
+    rs = _request_state(previous_response_id=None)
+    lookup = DurableBridgeLookup(
+        session_id="sid",
+        canonical_kind="session_header",
+        canonical_key="k",
+        api_key_scope="scope",
+        account_id="acc",
+        owner_instance_id=None,
+        owner_epoch=0,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id="resp_durable",
+    )
+    assert _http_bridge_checkpoint_lookup_key(rs, durable_lookup=lookup) == "resp_durable"
+
+    # 3. both cleared -> checkpoint pointer survives
+    rs = _request_state(previous_response_id=None)
+    lookup = DurableBridgeLookup(
+        session_id="sid",
+        canonical_kind="session_header",
+        canonical_key="k",
+        api_key_scope="scope",
+        account_id="acc",
+        owner_instance_id=None,
+        owner_epoch=0,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id=None,
+        latest_checkpoint_response_id="resp_checkpoint",
+    )
+    assert _http_bridge_checkpoint_lookup_key(rs, durable_lookup=lookup) == "resp_checkpoint"
+
+    # 4. nothing available -> None
+    assert _http_bridge_checkpoint_lookup_key(rs, durable_lookup=None) is None
 
 
 def test_checkpoint_settings_exist() -> None:

@@ -50,6 +50,7 @@ class DurableBridgeLookup:
     model: str | None = None
     latest_pending_tool_calls: dict[str, str] | None = None
     owner_process_epoch: str | None = None
+    latest_checkpoint_response_id: str | None = None
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -416,6 +417,18 @@ class DurableBridgeSessionCoordinator:
         if snapshot is None:
             return None
         return _to_lookup(snapshot)
+
+    async def set_session_checkpoint_pointer(
+        self,
+        *,
+        session_id: str,
+        response_id: str,
+    ) -> None:
+        async with self._session() as session:
+            await DurableBridgeRepository(session).set_session_checkpoint_pointer(
+                session_id=session_id,
+                response_id=response_id,
+            )
 
     async def record_recovery_attempt(
         self,
@@ -952,4 +965,5 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
         latest_pending_tool_calls=snapshot.latest_pending_tool_calls,
+        latest_checkpoint_response_id=snapshot.latest_checkpoint_response_id,
     )

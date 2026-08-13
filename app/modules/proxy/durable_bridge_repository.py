@@ -144,6 +144,7 @@ class DurableBridgeSessionSnapshot:
     latest_input_full_fingerprint: str | None
     last_seen_at: datetime
     closed_at: datetime | None
+    latest_checkpoint_response_id: str | None = None
     latest_pending_tool_calls: dict[str, str] | None = None
     owner_process_epoch: str | None = None
 
@@ -849,6 +850,32 @@ class DurableBridgeRepository:
             owner_epoch=owner_epoch,
             values=values,
         )
+
+    async def set_session_checkpoint_pointer(
+        self,
+        *,
+        session_id: str,
+        response_id: str,
+    ) -> DurableBridgeSessionSnapshot | None:
+        """Advance the durable session's canonical checkpoint pointer.
+
+        Deliberately owner-fence-free: the pointer is the last response id
+        with a fully persisted account-neutral checkpoint and must survive
+        owner lease changes and ``clear_latest_response_anchor`` so an
+        owner-unavailable continuation can still be rehydrated.
+        """
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(HttpBridgeSessionRecord.id == session_id)
+                .values(latest_checkpoint_response_id=response_id)
+                .returning(*_SNAPSHOT_COLUMNS)
+            )
+            updated_row = result.one_or_none()
+            await self._session.commit()
+        if updated_row is not None:
+            return _returned_row_to_snapshot(updated_row)
+        return None
 
     async def record_recovery_attempt(
         self,
@@ -2932,6 +2959,7 @@ _SNAPSHOT_COLUMNS = (
     HttpBridgeSessionRecord.latest_pending_tool_calls_json,
     HttpBridgeSessionRecord.last_seen_at,
     HttpBridgeSessionRecord.closed_at,
+    HttpBridgeSessionRecord.latest_checkpoint_response_id,
 )
 
 
@@ -2961,6 +2989,7 @@ def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSess
         ),
         last_seen_at=mapping[HttpBridgeSessionRecord.last_seen_at],
         closed_at=mapping[HttpBridgeSessionRecord.closed_at],
+        latest_checkpoint_response_id=mapping[HttpBridgeSessionRecord.latest_checkpoint_response_id],
     )
 
 
@@ -2991,6 +3020,7 @@ def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSna
         ),
         last_seen_at=row.last_seen_at,
         closed_at=row.closed_at,
+        latest_checkpoint_response_id=row.latest_checkpoint_response_id,
     )
 
 

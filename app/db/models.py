@@ -1850,6 +1850,11 @@ class HttpBridgeSessionRecord(Base):
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Last response id with a fully persisted account-neutral checkpoint.
+    # Unlike ``latest_response_id`` it survives ``clear_latest_response_anchor``
+    # (stuck/eventless timeout), so owner-unavailable replay still has a
+    # canonical context source after the upstream anchor is invalidated.
+    latest_checkpoint_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_input_full_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     latest_pending_tool_calls_json: Mapped[str | None] = mapped_column(Text, nullable=True)

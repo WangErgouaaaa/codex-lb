@@ -13,6 +13,8 @@
 - [x] 2.4 Preserve fail-closed behavior for unsafe state, policy conflicts, post-selection failures, and partial output.
 - [x] 2.5 Require completed retained response output and ordered fresh input after the durable prefix proof.
 - [x] 2.6 Project verified full resends to portable plaintext by removing reasoning, upstream item identities, and completed search bookkeeping while validating retained client turn metadata.
+- [x] 2.7 Accept a missing payload anchor only when a hard Codex session header still resolves a durable account owner, then project and explicitly classify the complete client-carried history before cross-account replay.
+- [x] 2.8 Keep unclassified, owner-scoped, incomplete, soft-key, and ownerless anchorless resends fail-closed.
 
 ## 3. Durable Recovery Ownership
 
@@ -31,3 +33,4 @@
 - [x] 4.5 Complete a fresh independent multi-agent review pass with no new actionable findings.
 - [x] 4.6 Add unit and route regressions for encrypted-reasoning projection, multiple retained turns, and a direct call/output split across the durable boundary.
 - [x] 4.7 Re-run formatting, lint, type, architecture, strict OpenSpec, focused, and broader regression gates for the projection change.
+- [x] 4.8 Add an HTTP bridge regression for the Codex session-header-only owner binding after `latest_response_id` has been cleared, including plaintext projection and unsafe-shape rejection.

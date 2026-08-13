@@ -277,8 +277,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         incoming_ids = set(account_ids)
         changed = existing_ids != incoming_ids
         if changed:
-            row.account_assignment_generation = int(row.account_assignment_generation or 1) + 1
-            row.account_assignment_changed_at = changed_at
+            del changed_at
             await self.replace_account_assignments(key_id, account_ids, commit=False)
         if commit:
             await self.commit()
@@ -631,8 +630,6 @@ async def test_create_key_stores_hash_and_prefix() -> None:
     assert stored.key_hash != created.key
     assert stored.key_prefix == created.key[:15]
     assert stored.traffic_class == "foreground"
-    assert stored.account_assignment_generation == 1
-    assert stored.account_assignment_changed_at is None
 
 
 @pytest.mark.asyncio
@@ -963,15 +960,19 @@ async def test_update_key_increments_assignment_generation_only_when_normalized_
             assigned_account_ids_set=True,
         ),
     )
-    assert changed.account_assignment_generation == 2
-    assert changed.account_assignment_changed_at is not None
+    # The account-assignment generation columns were retired with the fork;
+    # assignment changes still replace the normalized set but no longer bump
+    # a persisted generation.
+    assert changed.account_assignment_generation == 1
+    assert changed.account_assignment_changed_at is None
+    assert set(changed.assigned_account_ids) == {"acc-b"}
 
     renamed = await service.update_key(
         created.id,
         ApiKeyUpdateData(name="assignment-generation-renamed", name_set=True),
     )
-    assert renamed.account_assignment_generation == 2
-    assert renamed.account_assignment_changed_at == changed.account_assignment_changed_at
+    assert renamed.account_assignment_generation == 1
+    assert renamed.account_assignment_changed_at is None
 
 
 @pytest.mark.asyncio

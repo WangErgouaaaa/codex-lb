@@ -13,7 +13,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import HttpBridgeSessionAlias, HttpBridgeSessionRecord, HttpBridgeSessionState
+from app.db.models import (
+    HttpBridgeCheckpointRecord,
+    HttpBridgeSessionAlias,
+    HttpBridgeSessionRecord,
+    HttpBridgeSessionState,
+)
 from app.db.session import sqlite_writer_section
 from app.modules.proxy.continuity import (
     HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
@@ -85,6 +90,22 @@ class DurableBridgeSessionSnapshot:
     latest_input_full_fingerprint: str | None
     last_seen_at: datetime
     closed_at: datetime | None
+    latest_checkpoint_response_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeCheckpointSnapshot:
+    response_id: str
+    session_id: str
+    api_key_scope: str
+    account_id: str | None
+    model: str | None
+    input_json: str
+    output_json: str | None
+    input_item_count: int
+    input_fingerprint: str | None
+    created_at: datetime
+    expires_at: datetime | None
 
 
 class DurableBridgeRepository:
@@ -364,6 +385,97 @@ class DurableBridgeRepository:
             owner_epoch=owner_epoch,
             values=values,
         )
+
+    async def set_session_checkpoint_pointer(
+        self,
+        *,
+        session_id: str,
+        response_id: str,
+    ) -> DurableBridgeSessionSnapshot | None:
+        """Advance the durable session's canonical checkpoint pointer.
+
+        Deliberately owner-fence-free: the pointer is the last response id
+        with a fully persisted account-neutral checkpoint and must survive
+        owner lease changes and anchor invalidation so an owner-unavailable
+        continuation can still be rehydrated.
+        """
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(HttpBridgeSessionRecord.id == session_id)
+                .values(latest_checkpoint_response_id=response_id)
+                .returning(*_SNAPSHOT_COLUMNS)
+            )
+            updated_row = result.one_or_none()
+            await self._session.commit()
+        if updated_row is not None:
+            return _returned_row_to_snapshot(updated_row)
+        return None
+
+    async def save_checkpoint(
+        self,
+        *,
+        response_id: str,
+        session_id: str,
+        api_key_scope: str,
+        account_id: str | None,
+        model: str | None,
+        input_json: str,
+        output_json: str | None,
+        input_item_count: int,
+        input_fingerprint: str | None,
+        ttl_seconds: float | None = None,
+    ) -> DurableBridgeCheckpointSnapshot:
+        """Upsert a canonical account-neutral continuation checkpoint.
+
+        The newest completion wins for a given response id. TTL is enforced at
+        read time so a late checkpoint never resurrects an expired row.
+        """
+        now = utcnow()
+        expires_at = now + timedelta(seconds=ttl_seconds) if ttl_seconds is not None and ttl_seconds > 0 else None
+        async with sqlite_writer_section():
+            existing = await self._session.scalar(
+                select(HttpBridgeCheckpointRecord).where(HttpBridgeCheckpointRecord.response_id == response_id)
+            )
+            if existing is not None:
+                existing.session_id = session_id
+                existing.api_key_scope = api_key_scope
+                existing.account_id = account_id
+                existing.model = model
+                existing.input_json = input_json
+                existing.output_json = output_json
+                existing.input_item_count = input_item_count
+                existing.input_fingerprint = input_fingerprint
+                existing.expires_at = expires_at
+                existing.updated_at = now
+                record = existing
+            else:
+                record = HttpBridgeCheckpointRecord(
+                    response_id=response_id,
+                    session_id=session_id,
+                    api_key_scope=api_key_scope,
+                    account_id=account_id,
+                    model=model,
+                    input_json=input_json,
+                    output_json=output_json,
+                    input_item_count=input_item_count,
+                    input_fingerprint=input_fingerprint,
+                    expires_at=expires_at,
+                )
+                self._session.add(record)
+            await self._session.commit()
+        return _to_checkpoint_snapshot(record)
+
+    async def get_checkpoint(self, *, response_id: str) -> DurableBridgeCheckpointSnapshot | None:
+        """Read the canonical checkpoint for a response id, honoring its TTL."""
+        record = await self._session.scalar(
+            select(HttpBridgeCheckpointRecord).where(HttpBridgeCheckpointRecord.response_id == response_id)
+        )
+        if record is None:
+            return None
+        if record.expires_at is not None and to_utc_naive(record.expires_at) <= utcnow():
+            return None
+        return _to_checkpoint_snapshot(record)
 
     async def _execute_fenced_session_update(
         self,
@@ -1063,6 +1175,7 @@ _SNAPSHOT_COLUMNS = (
     HttpBridgeSessionRecord.latest_input_full_fingerprint,
     HttpBridgeSessionRecord.last_seen_at,
     HttpBridgeSessionRecord.closed_at,
+    HttpBridgeSessionRecord.latest_checkpoint_response_id,
 )
 
 
@@ -1087,6 +1200,7 @@ def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSess
         latest_input_full_fingerprint=mapping[HttpBridgeSessionRecord.latest_input_full_fingerprint],
         last_seen_at=mapping[HttpBridgeSessionRecord.last_seen_at],
         closed_at=mapping[HttpBridgeSessionRecord.closed_at],
+        latest_checkpoint_response_id=mapping[HttpBridgeSessionRecord.latest_checkpoint_response_id],
     )
 
 
@@ -1112,6 +1226,23 @@ def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSna
         latest_input_full_fingerprint=row.latest_input_full_fingerprint,
         last_seen_at=row.last_seen_at,
         closed_at=row.closed_at,
+        latest_checkpoint_response_id=row.latest_checkpoint_response_id,
+    )
+
+
+def _to_checkpoint_snapshot(row: HttpBridgeCheckpointRecord) -> DurableBridgeCheckpointSnapshot:
+    return DurableBridgeCheckpointSnapshot(
+        response_id=row.response_id,
+        session_id=row.session_id,
+        api_key_scope=row.api_key_scope,
+        account_id=row.account_id,
+        model=row.model,
+        input_json=row.input_json,
+        output_json=row.output_json,
+        input_item_count=row.input_item_count,
+        input_fingerprint=row.input_fingerprint,
+        created_at=row.created_at,
+        expires_at=row.expires_at,
     )
 
 

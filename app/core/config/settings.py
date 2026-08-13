@@ -297,6 +297,17 @@ class Settings(BaseSettings):
     http_responses_session_bridge_request_budget_seconds: float = Field(default=7200.0, gt=0)
     http_responses_session_bridge_idle_ttl_seconds: float = Field(default=120.0, gt=0)
     http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
+    # When the previous-response owner account is unavailable (quota/rate
+    # limited) and the client payload carries its full local history, retry the
+    # request anchor-free on a different account. At-least-once: the original
+    # upstream attempt may have been accepted, so a replay can double-consume.
+    http_bridge_owner_unavailable_fresh_resend_enabled: bool = True
+    # Canonical account-neutral continuation checkpoints: written when a
+    # response completes, read when a compact follow-up's owner account is
+    # unavailable and the client did not carry full history. The checkpoint
+    # TTL bounds how long an expired owner can be replayed on a new account.
+    http_bridge_checkpoint_replay_enabled: bool = True
+    http_bridge_checkpoint_ttl_seconds: float = Field(default=7 * 24 * 60 * 60, ge=0)
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
     http_responses_session_bridge_response_created_timeout_seconds: float = Field(default=20.0, gt=0)

@@ -17202,6 +17202,10 @@ async def test_http_bridge_cutover_previous_response_owner_allows_authoritative_
         AsyncMock(return_value="acc-owner"),
     )
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    # A trimmed follow-up with no recoverable history probes the canonical
+    # checkpoint when the owner is unavailable; this test asserts the rebind
+    # fail-closed path, so the checkpoint probe reports a miss.
+    monkeypatch.setattr(service._durable_bridge, "get_checkpoint", AsyncMock(return_value=None))
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_via_http_bridge(
@@ -17505,7 +17509,11 @@ async def test_http_bridge_cutover_portable_replay_projects_plaintext_durable_fu
             last_call = get_or_create.await_args
             assert last_call is not None
             assert last_call.kwargs["previous_response_id"] is None
-        if unsafe_replay_input in {"missing_owner", "missing_prior_output", "orphan_output"}:
+        if unsafe_replay_input in {"missing_owner", "missing_prior_output"}:
+            # The durable-prefix path rejects before classification (no
+            # prior-output boundary) or the missing owner fails closed before
+            # the loop; the fresh-resend gate then short-circuits on the
+            # cached verdict instead of calling the classifier again.
             account_neutral_classifier.assert_not_called()
         else:
             account_neutral_classifier.assert_called_once()
@@ -19884,3 +19892,185 @@ async def test_cancel_api_key_reservation_heartbeat_task_does_not_wait_for_task_
     await asyncio.sleep(0)
 
     assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_replays_anchorless_full_resend_bound_to_durable_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex continuation anchors live in the session header, not the payload."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    client_input: list[proxy_service.JsonValue] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old question"}],
+        },
+        {
+            "type": "reasoning",
+            "id": "rs_owner",
+            "encrypted_content": "encrypted-owner-scoped-reasoning",
+            "summary": [],
+        },
+        {
+            "type": "message",
+            "id": "msg_owner",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "old answer"}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "next question"}],
+        },
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": client_input,
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-anchorless-owner",
+        canonical_kind="session_header",
+        canonical_key="sid-anchorless-owner",
+        api_key_scope="__anonymous__",
+        account_id="acc-owner",
+        owner_instance_id=None,
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="sid-anchorless-owner",
+        # The stuck-timeout path may clear the upstream response anchor while
+        # retaining the durable session's account ownership.
+        latest_response_id=None,
+    )
+    owner_unavailable = ProxyResponseError(
+        502,
+        proxy_service.openai_error(
+            "previous_response_owner_unavailable",
+            "Previous response owner account is unavailable; retry later.",
+            error_type="server_error",
+        ),
+    )
+    create_attempt = 0
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **_kwargs: Any,
+    ) -> proxy_service._HTTPBridgeSession:
+        nonlocal create_attempt
+        create_attempt += 1
+        if create_attempt == 1:
+            raise owner_unavailable
+        session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        session.account = cast(
+            Any,
+            SimpleNamespace(id="acc-fallback", status=AccountStatus.ACTIVE, plan_type="plus"),
+        )
+        return session
+
+    get_or_create = AsyncMock(side_effect=fake_get_or_create)
+    captured_text_data: list[str] = []
+
+    async def fake_stream_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        propagate_http_errors: bool,
+        downstream_turn_state: str | None,
+        request_deadline: float | None = None,
+    ):
+        del (
+            _session,
+            request_state,
+            queue_limit,
+            propagate_http_errors,
+            downstream_turn_state,
+            request_deadline,
+        )
+        captured_text_data.append(text_data)
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={
+                "session_id": "sid-anchorless-owner",
+                "X-Codex-Turn-State": "turn-anchorless-owner",
+            },
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+            enforce_openai_sdk_contract=False,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert get_or_create.await_count == 2
+    first_call, replay_call = get_or_create.await_args_list
+    assert first_call.args[0].strength == "hard"
+    assert first_call.kwargs["preferred_account_id"] == "acc-owner"
+    assert replay_call.kwargs["preferred_account_id"] is None
+    assert replay_call.kwargs["durable_lookup"] is None
+    assert replay_call.kwargs["exclude_account_ids"] == {"acc-owner"}
+    assert replay_call.kwargs["allow_forward_to_owner"] is False
+    assert is_http_bridge_account_neutral_replay(
+        kind=replay_call.args[0].affinity_kind,
+        key=replay_call.args[0].affinity_key,
+    )
+    replay_payload = json.loads(captured_text_data[0])
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old question"}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "old answer"}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "next question"}],
+        },
+    ]
+    assert "encrypted_content" not in captured_text_data[0]
+    assert all("id" not in item for item in replay_payload["input"])

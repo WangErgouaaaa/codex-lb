@@ -259,7 +259,31 @@ def _http_bridge_quarantine_remaining_seconds(
 
 
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
-    return responses_payload_is_account_neutral_fresh_replay(payload.to_payload())
+    # Classification sees the raw payload with replayed tool-call namespaces
+    # preserved so shape validation can reject namespaced calls instead of
+    # hiding them before the verdict.
+    return responses_payload_is_account_neutral_fresh_replay(payload.to_replay_safety_payload())
+
+
+def _http_bridge_checkpoint_lookup_key(
+    request_state: _WebSocketRequestState,
+    *,
+    durable_lookup: DurableBridgeLookup | None,
+) -> str | None:
+    """Resolve the canonical checkpoint key for an owner-unavailable replay.
+
+    Precedence: the request's own previous-response anchor, then the durable
+    session's latest response id, then the session's checkpoint pointer (the
+    last response id with a fully persisted account-neutral checkpoint, which
+    survives anchor invalidation).
+    """
+    if request_state.previous_response_id is not None:
+        return request_state.previous_response_id
+    if durable_lookup is not None:
+        if durable_lookup.latest_response_id is not None:
+            return durable_lookup.latest_response_id
+        return durable_lookup.latest_checkpoint_response_id
+    return None
 
 
 def _proxy_error_code_message(exc: ProxyResponseError) -> tuple[str | None, str | None]:
@@ -1291,6 +1315,115 @@ class _HTTPBridgeStreamingMixin:
                 )
             return durable_full_resend_is_account_neutral
 
+        def fresh_resend_owner_unavailable_replay_allowed() -> bool:
+            """Owner unavailable and the client carried its full local history:
+            fall back to an anchor-free resend without the durable fingerprint
+            proof. The stored-context proof can legitimately fail when the
+            durable row records a larger input than the client resends (for
+            example a parallel/unrelated request), even though the client body
+            is complete for its own conversation. Requiring assistant turns
+            keeps a trimmed follow-up (anchor + new message only) from being
+            misclassified as a full resend.
+
+            The continuation must be owner-bound through *some* anchor: the
+            payload ``previous_response_id``, or the durable session row
+            resolved from a hard session header. Codex HTTP/SSE continuations
+            carry the anchor in the header, never in the payload, so requiring
+            a payload anchor would leave every codex resend dead on arrival.
+            A plain fresh request with a long input is not a continuation and
+            must not be replayed as one.
+            """
+            nonlocal durable_full_resend_fresh_payload
+            nonlocal durable_full_resend_is_account_neutral
+
+            if (
+                forwarded_request
+                or rewritten_file_account_id is not None
+                or not _service_get_settings().http_bridge_owner_unavailable_fresh_resend_enabled
+            ):
+                return False
+            if not payload_looks_like_full_resend:
+                return False
+            input_items = payload.input if isinstance(payload.input, list) else None
+            if not input_items:
+                return False
+            if not any(isinstance(item, dict) and item.get("role") == "assistant" for item in input_items):
+                return False
+            # The owner provenance can come from a payload anchor or from a
+            # durable row found through a hard Codex session header.
+            if effective_payload.previous_response_id is None and (
+                durable_lookup is None or durable_lookup.account_id is None or bridge_session_key.strength != "hard"
+            ):
+                return False
+            if durable_full_resend_is_account_neutral is False:
+                return False
+            # The fallback always switches accounts and removes the upstream
+            # anchor. Project the entire client-carried history to plaintext
+            # account-neutral items, even when the payload itself carried the
+            # owner anchor. This strips response-owned reasoning/IDs and makes
+            # ``None`` fail closed instead of acting as an implicit allow.
+            eligibility_projection = project_responses_input_for_account_neutral_fresh_replay(
+                cast(list[JsonValue], input_items),
+                stored_count=len(input_items),
+                preserve_developer_message_ids=True,
+            )
+            if eligibility_projection is None:
+                return False
+            eligibility_payload = _http_bridge_payload_without_previous_response_id(
+                untrimmed_effective_payload
+            ).model_copy(update={"input": eligibility_projection.input_items})
+            durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
+                eligibility_payload
+            )
+            if not durable_full_resend_is_account_neutral:
+                return False
+            replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+                cast(list[JsonValue], input_items),
+                stored_count=len(input_items),
+            )
+            if replay_projection is None:
+                return False
+            durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
+                untrimmed_effective_payload
+            ).model_copy(update={"input": replay_projection.input_items})
+            return True
+
+        def checkpoint_replay_owner_unavailable_allowed() -> bool:
+            """Owner unavailable and this request has no recoverable full
+            history of its own (no assistant turns): neither the official
+            account-neutral replay nor the fresh-resend fallback applies. The
+            server can still rebuild the full conversation from the canonical
+            checkpoint stored when the parent response completed, then replay
+            anchor-free on another account.
+
+            The checkpoint key is resolved through the durable session, not the
+            payload: codex HTTP/SSE continuations carry no
+            ``previous_response_id`` (session header affinity instead), and a
+            stuck/eventless timeout may have cleared the durable
+            ``latest_response_id``. The session's ``latest_checkpoint_response_id``
+            pointer survives both, so it is the last resort key.
+            """
+            if (
+                forwarded_request
+                or rewritten_file_account_id is not None
+                or not getattr(_service_get_settings(), "http_bridge_checkpoint_replay_enabled", False)
+            ):
+                return False
+            if payload_looks_like_full_resend:
+                return False
+            input_items = payload.input if isinstance(payload.input, list) else None
+            if not input_items:
+                return False
+            if any(isinstance(item, dict) and item.get("role") == "assistant" for item in input_items):
+                return False
+            checkpoint_key = _http_bridge_checkpoint_lookup_key(
+                request_state,
+                durable_lookup=durable_lookup,
+            )
+            if checkpoint_key is None:
+                return False
+            return True
+
         def switch_to_account_neutral_replay() -> None:
             nonlocal account_neutral_recovery
             nonlocal affinity
@@ -1424,6 +1557,86 @@ class _HTTPBridgeStreamingMixin:
                 )
             except ProxyResponseError as exc:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
+                    if (
+                        _http_bridge_is_previous_response_owner_unavailable(exc)
+                        and fresh_resend_owner_unavailable_replay_allowed()
+                    ):
+                        # The client sent its full local history but the owner
+                        # account is exhausted. Resend the body anchor-free on
+                        # another account instead of failing with the owner
+                        # unavailable 502. At-least-once by design; the owner is
+                        # excluded so the retry cannot land on it again.
+                        _log_http_bridge_event(
+                            "owner_unavailable_fresh_resend",
+                            bridge_session_key,
+                            account_id=request_state.preferred_account_id,
+                            model=payload.model,
+                            detail="outcome=plaintext_full_resend_without_anchor",
+                            cache_key_family=bridge_session_key.affinity_kind,
+                            model_class=_extract_model_class(payload.model) if payload.model else None,
+                        )
+                        if durable_full_resend_fresh_payload is None:
+                            durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
+                                untrimmed_effective_payload
+                            )
+                        switch_to_account_neutral_replay()
+                        continue
+                    if (
+                        _http_bridge_is_previous_response_owner_unavailable(exc)
+                        and checkpoint_replay_owner_unavailable_allowed()
+                    ):
+                        # Trimmed follow-up whose owner account is exhausted.
+                        # Rebuild the full conversation from the canonical
+                        # checkpoint stored at parent completion, then resend
+                        # anchor-free on another account. At-least-once by
+                        # design; the owner is excluded so the retry cannot
+                        # land on it again.
+                        checkpoint_response_id = _http_bridge_checkpoint_lookup_key(
+                            request_state,
+                            durable_lookup=durable_lookup,
+                        )
+                        checkpoint = (
+                            await self._durable_bridge.get_checkpoint(response_id=checkpoint_response_id)
+                            if checkpoint_response_id is not None
+                            else None
+                        )
+                        if checkpoint is not None:
+                            _log_http_bridge_event(
+                                "owner_unavailable_checkpoint_replay",
+                                bridge_session_key,
+                                account_id=request_state.preferred_account_id,
+                                model=payload.model,
+                                detail=(
+                                    f"outcome=checkpoint_rehydrated_resend stored_items={checkpoint.input_item_count}"
+                                ),
+                                cache_key_family=bridge_session_key.affinity_kind,
+                                model_class=_extract_model_class(payload.model) if payload.model else None,
+                            )
+                            try:
+                                stored_input = json.loads(checkpoint.input_json)
+                                stored_output = json.loads(checkpoint.output_json) if checkpoint.output_json else []
+                            except (TypeError, json.JSONDecodeError):
+                                logger.warning(
+                                    "Checkpoint payload malformed response_id=%s; failing closed to owner-unavailable",
+                                    effective_payload.previous_response_id,
+                                )
+                                raise
+                            rehydrated_input = list(stored_input) + list(stored_output)
+                            client_input = payload.input if isinstance(payload.input, list) else []
+                            # The trimmed follow-up's own user message(s) are
+                            # appended after the stored conversation.
+                            while rehydrated_input and client_input and rehydrated_input[-1] == client_input[0]:
+                                client_input = client_input[1:]
+                            rehydrated_input = rehydrated_input + list(client_input)
+                            durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
+                                untrimmed_effective_payload
+                            ).model_copy(update={"input": rehydrated_input})
+                            switch_to_account_neutral_replay()
+                            continue
+                        logger.info(
+                            "Checkpoint missing response_id=%s; failing closed to owner-unavailable 502",
+                            effective_payload.previous_response_id,
+                        )
                     wait_plan = _http_bridge_capacity_wait_plan(exc, request_deadline=request_deadline)
                     if wait_plan is not None:
                         bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
@@ -1947,6 +2160,12 @@ class _HTTPBridgeStreamingMixin:
                 initial_handoff_session,
                 request_scope_id=initial_handoff_scope_id,
             )
+        # Canonical continuation checkpoint: carry the full (pre-trim) client
+        # input on the request state so response.completed can persist an
+        # account-neutral checkpoint keyed by the new response id.
+        untrimmed_input = untrimmed_effective_payload.input
+        if isinstance(untrimmed_input, list):
+            request_state.checkpoint_input_items = cast(list[JsonValue], untrimmed_input)
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,

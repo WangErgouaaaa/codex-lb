@@ -42,11 +42,13 @@ _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal"})
 _COMPACT_STATE_TOOL_NAMES = frozenset({"create_goal", "get_goal", "update_goal", "update_plan"})
 _COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
+_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
     {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
 )
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
+_EXPLICIT_PROMPT_CACHE_CONTENT_TYPES = frozenset({"input_text", "input_image", "input_file"})
 
 
 def _json_mapping_or_none(value: JsonValue) -> Mapping[str, JsonValue] | None:
@@ -728,6 +730,9 @@ class ResponsesRequest(BaseModel):
     def to_payload(self) -> JsonObject:
         return _strip_unsupported_fields(self.model_dump_for_forwarding())
 
+    def to_replay_safety_payload(self) -> JsonObject:
+        return _strip_unsupported_fields(self.model_dump_for_forwarding(), strip_replayed_tool_call_namespaces=False)
+
 
 class ResponsesCompactRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -797,11 +802,59 @@ _COMPACT_UPSTREAM_HEAD_ESTIMATED_TOKENS = 12_000
 _ESTIMATED_CHARS_PER_TOKEN = 4
 
 
-def _strip_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
+def _strip_subscription_prompt_cache_controls(payload: MutableJsonObject) -> None:
+    payload.pop("prompt_cache_options", None)
+    _strip_subscription_prompt_cache_breakpoints(payload.get("input"))
+
+
+def _strip_subscription_prompt_cache_breakpoints(value: JsonValue | None) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _strip_subscription_prompt_cache_breakpoints(item)
+        return
+    if not isinstance(value, dict):
+        return
+    value_type = value.get("type")
+    if isinstance(value_type, str) and value_type in _EXPLICIT_PROMPT_CACHE_CONTENT_TYPES:
+        value.pop("prompt_cache_breakpoint", None)
+    for child in value.values():
+        _strip_subscription_prompt_cache_breakpoints(child)
+
+
+def strip_replayed_tool_call_namespaces_from_payload(payload: MutableJsonObject) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+    normalized_items: list[JsonValue] = []
+    changed = False
+    for item in input_value:
+        if not is_json_mapping(item):
+            normalized_items.append(item)
+            continue
+        item_type = item.get("type")
+        if isinstance(item_type, str) and item_type in _TOOL_CALL_ITEM_TYPES and "namespace" in item:
+            normalized_item = dict(item)
+            normalized_item.pop("namespace")
+            normalized_items.append(normalized_item)
+            changed = True
+        else:
+            normalized_items.append(item)
+    if changed:
+        payload["input"] = normalized_items
+
+
+def _strip_unsupported_fields(
+    payload: MutableJsonObject,
+    *,
+    strip_replayed_tool_call_namespaces: bool = True,
+) -> MutableJsonObject:
     _normalize_openai_compatible_aliases(payload)
     _normalize_service_tier_aliases(payload)
+    _strip_subscription_prompt_cache_controls(payload)
     _sanitize_interleaved_reasoning_input(payload)
     _strip_poisoned_local_compact_fallback_items(payload)
+    if strip_replayed_tool_call_namespaces:
+        strip_replayed_tool_call_namespaces_from_payload(payload)
     # ``tools`` is deliberately NOT canonicalized here: the wire payload must
     # forward client tool entries byte-preserved (array order, key order, and
     # unknown keys untouched) so reserved model tools survive upstream

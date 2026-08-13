@@ -15,6 +15,7 @@ from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    DurableBridgeCheckpointSnapshot,
     DurableBridgeRepository,
     DurableBridgeSessionSnapshot,
     durable_bridge_api_key_scope,
@@ -41,6 +42,7 @@ class DurableBridgeLookup:
     latest_input_item_count: int | None = None
     latest_input_full_fingerprint: str | None = None
     model: str | None = None
+    latest_checkpoint_response_id: str | None = None
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -374,6 +376,50 @@ class DurableBridgeSessionCoordinator:
                 latest_input_full_fingerprint=input_full_fingerprint,
             )
 
+    async def set_session_checkpoint_pointer(
+        self,
+        *,
+        session_id: str,
+        response_id: str,
+    ) -> None:
+        async with self._session() as session:
+            await DurableBridgeRepository(session).set_session_checkpoint_pointer(
+                session_id=session_id,
+                response_id=response_id,
+            )
+
+    async def save_checkpoint(
+        self,
+        *,
+        response_id: str,
+        session_id: str,
+        api_key_scope: str,
+        account_id: str | None,
+        model: str | None,
+        input_json: str,
+        output_json: str | None,
+        input_item_count: int,
+        input_fingerprint: str | None,
+        ttl_seconds: float | None = None,
+    ) -> DurableBridgeCheckpointSnapshot:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).save_checkpoint(
+                response_id=response_id,
+                session_id=session_id,
+                api_key_scope=api_key_scope,
+                account_id=account_id,
+                model=model,
+                input_json=input_json,
+                output_json=output_json,
+                input_item_count=input_item_count,
+                input_fingerprint=input_fingerprint,
+                ttl_seconds=ttl_seconds,
+            )
+
+    async def get_checkpoint(self, *, response_id: str) -> DurableBridgeCheckpointSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_checkpoint(response_id=response_id)
+
     async def register_session_header(
         self,
         *,
@@ -415,4 +461,5 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_item_count=snapshot.latest_input_item_count,
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
+        latest_checkpoint_response_id=snapshot.latest_checkpoint_response_id,
     )

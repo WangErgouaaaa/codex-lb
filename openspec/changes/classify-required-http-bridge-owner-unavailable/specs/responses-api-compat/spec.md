@@ -2,7 +2,9 @@
 
 ### Requirement: Verified full resend can recover from selection-time owner loss
 
-An HTTP bridge request MAY move from an unavailable continuity owner to another account only after a typed pre-visible `continuity_owner_unavailable` account-selection result, which the HTTP bridge maps to `previous_response_owner_unavailable`, and positive durable proof that the request contains the complete retained input history. A missing durable owner is not a selector result and MUST fail closed without replay. The durable row MUST provide a positive input-item count and full fingerprint, and the corresponding raw prefix of the incoming list-shaped input MUST match both before any projection occurs.
+An HTTP bridge request MAY move from an unavailable continuity owner to another account only after a typed pre-visible `continuity_owner_unavailable` account-selection result, which the HTTP bridge maps to `previous_response_owner_unavailable`, and positive proof that the request contains portable retained history. A missing durable owner is not a selector result and MUST fail closed without replay.
+
+The normal proof path MUST use a durable row with a positive input-item count and full fingerprint, and the corresponding raw prefix of the incoming list-shaped input MUST match both before any projection occurs. If a stuck-timeout path has cleared `latest_response_id` and the associated input-prefix metadata, an anchorless Codex HTTP/SSE request MAY instead use a hard session header as ownership provenance only when that header resolves a durable row with a nonblank account owner, the payload supplies no `previous_response_id`, and the list-shaped input is a full-resend shape containing at least one assistant turn. This fallback MUST project the complete client-carried input before dispatch and MUST receive an explicit positive account-neutral replay verdict. An absent verdict MUST NOT be treated as safe. A soft affinity key, missing durable row or account owner, non-list input, incomplete history without an assistant turn, or unsafe projected request MUST fail closed.
 
 After the raw prefix proof, the service MUST construct a deterministic plaintext projection by omitting `reasoning`, `web_search_call`, `tool_search_call`, and `tool_search_output` items and removing upstream `id` fields from every retained input item. Retained `internal_chat_message_metadata_passthrough` MUST contain only a nonblank string `turn_id` when present. The projected suffix after the projected prefix MUST contain a completed assistant `output_text` or `refusal` boundary with nonblank content followed by nonblank fresh text or valid fresh file/image input. The suffix MAY contain multiple intervening turns only when every non-final user-input sequence is followed by another completed assistant boundary and the final sequence ends in fresh input. Direct intrinsic calls MAY precede an assistant boundary only when terminal completed or failed outputs settle every represented call in order. A call at the end of the verified raw prefix MAY be settled by its matching output at the start of the suffix. A direct-call/output sequence alone MUST NOT prove completeness because the persisted metadata does not identify omitted parallel calls. A matching prefix followed only by new user input, empty content, tool-call-only output, in-progress or partial retained output, duplicate, unmatched, or unresolved calls, or misordered call output MUST fail closed.
 
@@ -25,6 +27,25 @@ For an eligible replay, the service MUST remove `previous_response_id`, strip ev
 - **AND** the proxy injects that response as the reattach anchor
 - **WHEN** required-owner selection returns typed `continuity_owner_unavailable` before output
 - **THEN** the same fresh-replay rules apply after the injected anchor is removed
+
+#### Scenario: Cleared anchor recovers through a hard Codex session header
+
+- **GIVEN** a stuck timeout cleared the durable session's latest response anchor and input-prefix metadata
+- **AND** the payload has no `previous_response_id`
+- **AND** a hard Codex session header still resolves that durable session to account A
+- **AND** the client carries a self-contained full history with a retained assistant turn
+- **WHEN** required-owner selection returns typed `continuity_owner_unavailable` before output
+- **THEN** the bridge projects the complete history to account-neutral plaintext
+- **AND** it strips encrypted reasoning and upstream item identities
+- **AND** it excludes account A and submits the projected fresh request once on account B
+
+#### Scenario: Anchorless resend has no explicit safe verdict
+
+- **GIVEN** an anchorless full-resend-shaped payload reaches owner-unavailable recovery
+- **AND** its durable lookup is missing an account owner, came from a soft key, or its complete plaintext projection is not self-contained and account-neutral
+- **WHEN** the bridge evaluates cross-account replay
+- **THEN** it keeps `previous_response_owner_unavailable`
+- **AND** it sends none of the request state to another account
 
 #### Scenario: Verified resend contains owner-bound reasoning
 
@@ -221,6 +242,13 @@ The proxy SHALL preserve file-owner routing during pre-visible refresh and upstr
 - **WHEN** the bridge retries after an upstream close before visible output
 - **THEN** the proxy keeps the anchored request owner-bound instead of stripping the anchor, excluding the owner, and replaying the file reference on another account
 - **AND** if the file owner cannot be reselected, the retry fails closed instead of reconnecting the bridge on a replacement account
+
+#### Scenario: verified owner refresh failover releases the failed stream lease
+
+- **GIVEN** a streaming request selects the previous-response owner and holds an account stream lease
+- **AND** a locally verified full resend permits failover after that owner fails refresh or connect before output is emitted
+- **WHEN** the proxy excludes the failed owner and selects a replacement account
+- **THEN** the failed owner's stream lease is released before replacement selection so the owner does not retain stale local pressure
 
 #### Scenario: post-selection owner failure remains owner-bound
 

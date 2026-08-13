@@ -488,8 +488,9 @@ class ApiKeysRepository:
         incoming_ids = set(account_ids)
         changed = existing_ids != incoming_ids
         if changed:
-            row.account_assignment_generation = int(row.account_assignment_generation or 1) + 1
-            row.account_assignment_changed_at = changed_at
+            # The account-assignment generation columns were retired with the
+            # fork; assignment changes no longer bump a persisted generation.
+            del changed_at
             await self.replace_account_assignments(key_id, account_ids, commit=False)
         if commit:
             await self._session.commit()

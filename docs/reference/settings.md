@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 119 settings. Every setting is an environment
+codex-lb currently exposes 123 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -74,6 +74,7 @@ the host side of the compose `ports` mapping instead.
 | `CODEX_LB_MAX_DECOMPRESSED_RESPONSES_BODY_BYTES` | `int` | `134217728` |
 | `CODEX_LB_MAX_SSE_EVENT_BYTES` | `int` | `16777216` |
 | `CODEX_LB_SSE_KEEPALIVE_INTERVAL_SECONDS` | `float` | `10.0` |
+| `CODEX_LB_STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `float` | `60.0` |
 | `CODEX_LB_STREAM_IDLE_TIMEOUT_SECONDS` | `float` | `7200.0` |
 | `CODEX_LB_TRANSCRIPTION_REQUEST_BUDGET_SECONDS` | `float` | `120.0` |
 
@@ -242,6 +243,9 @@ the host side of the compose `ports` mapping instead.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_API_KEY_ACCOUNT_ASSIGNMENT_DRAIN_SECONDS` | `int` | `1800` |
+| `CODEX_LB_HTTP_BRIDGE_CHECKPOINT_REPLAY_ENABLED` | `bool` | `True` |
+| `CODEX_LB_HTTP_BRIDGE_CHECKPOINT_TTL_SECONDS` | `float` | `604800` |
+| `CODEX_LB_HTTP_BRIDGE_OWNER_UNAVAILABLE_FRESH_RESEND_ENABLED` | `bool` | `True` |
 | `CODEX_LB_STRICT_SERVICE_TIER_ACCOUNT_FILTER` | `bool` | `True` |
 | `CODEX_LB_WARMUP_MODEL` | `str` | `'gpt-5.4-mini'` |
 

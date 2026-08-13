@@ -844,6 +844,12 @@ class _WebSocketRequestState:
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
+    # ``checkpoint_input_items`` is the full (pre-trim) client input, and
+    # ``checkpoint_output_items`` collects the completed response's output
+    # items. Together they form the canonical account-neutral continuation
+    # checkpoint persisted at response.completed.
+    checkpoint_input_items: list[JsonValue] | None = None
+    checkpoint_output_items: list[JsonValue] | None = None
     api_key_reservation_last_touch_at: float = field(default_factory=time.monotonic)
     api_key_reservation_heartbeat_stop: asyncio.Event | None = None
     api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None

@@ -49,6 +49,19 @@ def _make_auth_json(account_id: str, email: str, *, plan_type: str = "plus") -> 
     }
 
 
+class _SseCompactResponse:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.status = 200
+        self.reason = "OK"
+        self.content = b"".join(chunks)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _JsonResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self.status = 200
@@ -72,7 +85,7 @@ class _JsonResponse:
 
 
 class _JsonSession:
-    def __init__(self, response: _JsonResponse) -> None:
+    def __init__(self, response: _JsonResponse | _SseCompactResponse) -> None:
         self._response = response
         self.calls: list[dict[str, object]] = []
 
@@ -508,15 +521,20 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
+    # ChatGPT retired the dedicated compact endpoint: the compact transport
+    # posts a streamed plain responses request and folds the SSE stream back
+    # into the legacy response.compact shape.
     session = _JsonSession(
-        _JsonResponse(
-            {
-                "object": "response.compaction",
-                "compaction_summary": {
-                    "encrypted_content": "enc_compact_summary_1",
-                    "summary_text": "condensed thread state",
-                },
-            }
+        _SseCompactResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_compact_1"}}\n\n',
+                b'data: {"type":"response.output_item.done","output_index":0,"item":'
+                b'{"type":"compaction_summary","id":"cs_1",'
+                b'"encrypted_content":"enc_compact_summary_1",'
+                b'"summary_text":"condensed thread state"}}\n\n',
+                b'data: {"type":"response.completed","response":{"id":"resp_compact_1",'
+                b'"status":"completed","output":[]}}\n\n',
+            ]
         )
     )
 
@@ -532,15 +550,17 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
 
     assert response.status_code == 200
     body = response.json()
-    assert body["object"] == "response.compaction"
-    assert body["compaction_summary"] == {
-        "encrypted_content": "enc_compact_summary_1",
-        "summary_text": "condensed thread state",
-    }
-    assert _session_call_url(session).endswith("/codex/responses/compact")
+    assert body["object"] == "response.compact"
+    output = body["output"]
+    assert isinstance(output, list) and output
+    summary_item = output[0]
+    assert summary_item["type"] == "compaction"
+    assert summary_item["encrypted_content"] == "enc_compact_summary_1"
+    assert _session_call_url(session).endswith("/codex/responses")
     call_json = _session_call_json(session)
-    assert "stream" not in call_json
-    assert "store" not in call_json
+    assert call_json["stream"] is True
+    assert call_json["store"] is False
+    assert call_json["input"] == [{"type": "compaction_trigger"}]
 
 
 @pytest.mark.asyncio

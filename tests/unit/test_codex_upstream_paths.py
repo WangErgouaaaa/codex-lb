@@ -1121,3 +1121,89 @@ async def test_responses_websocket_post_connect_network_failures_preserve_safe_c
     assert "user:pass" not in message.error
     assert rotate.await_count == 2
     assert all(call.kwargs["transport"] == "websocket" for call in rotate.await_args_list)
+
+
+class _SseChunkCompactResponse:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.status = 200
+        self.content = b"".join(chunks)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_read_compact_sse_payload_folds_streamed_events() -> None:
+    """output_item.done items are collected by output index and completed
+    metadata (usage/service_tier) is preserved."""
+    response = _SseChunkCompactResponse(
+        [
+            b'data: {"type":"response.created","response":{"id":"resp_c1"}}\n\n',
+            b'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"x"}}\n\n',
+            b'data: {"type":"response.output_item.done","output_index":0,"item":'
+            b'{"type":"compaction_summary","id":"cs_1","encrypted_content":"enc_1"}}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"resp_c1","status":"completed",'
+            b'"output":[],"usage":{"input_tokens":10},"service_tier":"default"}}\n\n',
+        ]
+    )
+    payload = await proxy_module._read_compact_sse_payload(response)
+    assert payload["object"] == "response.compact"
+    assert payload["id"] == "resp_c1"
+    assert payload["status"] == "completed"
+    assert payload["output"] == [{"type": "compaction_summary", "id": "cs_1", "encrypted_content": "enc_1"}]
+    assert payload["usage"] == {"input_tokens": 10}
+    assert payload["service_tier"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_read_compact_sse_payload_prefers_completed_output_array() -> None:
+    response = _SseChunkCompactResponse(
+        [
+            b'data: {"type":"response.completed","response":{"id":"resp_c2","status":"completed",'
+            b'"output":[{"type":"compaction_summary","encrypted_content":"enc_completed"}]}}\n\n',
+        ]
+    )
+    payload = await proxy_module._read_compact_sse_payload(response)
+    assert payload["output"] == [{"type": "compaction_summary", "encrypted_content": "enc_completed"}]
+
+
+@pytest.mark.asyncio
+async def test_read_compact_sse_payload_preserves_terminal_errors() -> None:
+    """response.failed / error terminals keep the upstream error instead of
+    being misreported as a malformed stream."""
+    failed = _SseChunkCompactResponse(
+        [
+            b'data: {"type":"response.created","response":{"id":"resp_c3"}}\n\n',
+            b'data: {"type":"response.failed","response":{"id":"resp_c3",'
+            b'"error":{"code":"upstream_error","message":"boom"}}}\n\n',
+        ]
+    )
+    payload = await proxy_module._read_compact_sse_payload(failed)
+    assert payload["status"] == "failed"
+    assert payload["error"] == {"code": "upstream_error", "message": "boom"}
+
+    error_event = _SseChunkCompactResponse(
+        [
+            b'data: {"type":"error","error":{"code":"rate_limit_exceeded","message":"slow down"}}\n\n',
+        ]
+    )
+    payload = await proxy_module._read_compact_sse_payload(error_event)
+    assert payload["status"] == "failed"
+    assert payload["error"] == {"code": "rate_limit_exceeded", "message": "slow down"}
+
+
+@pytest.mark.asyncio
+async def test_read_compact_sse_payload_accepts_plain_json_fallback() -> None:
+    """A non-SSE JSON success response is accepted as a fallback."""
+
+    class _JsonCompactFallback:
+        status = 200
+
+        async def json(self, *, content_type=None):
+            return {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_json"}}
+
+    payload = await proxy_module._read_compact_sse_payload(_JsonCompactFallback())
+    assert payload == {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_json"}}

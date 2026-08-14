@@ -9550,7 +9550,7 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
 
     async def _legacy_compact_read(response: object) -> dict[str, object]:
-        return await response.json()
+        return await cast(Any, response).json()
 
     monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _legacy_compact_read)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", fake_complete)
@@ -9596,7 +9596,7 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
 
     async def _legacy_compact_read(response: object) -> dict[str, object]:
-        return await response.json()
+        return await cast(Any, response).json()
 
     monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _legacy_compact_read)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
@@ -9744,7 +9744,7 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
 
     async def _legacy_compact_read(response: object) -> dict[str, object]:
-        return await response.json()
+        return await cast(Any, response).json()
 
     monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _legacy_compact_read)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
@@ -9787,7 +9787,7 @@ async def test_compact_responses_defaults_to_no_configured_request_timeout(monke
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
 
     async def _legacy_compact_read(response: object) -> dict[str, object]:
-        return await response.json()
+        return await cast(Any, response).json()
 
     monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _legacy_compact_read)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
@@ -14202,6 +14202,14 @@ async def test_stream_post_dispatch_network_failure_rotates_generation_for_next_
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+
+    async def _compact_read_response(response: object) -> dict[str, object]:
+        # The SSE reader consumes ``content``; the failure mock raises from
+        # that property. The recovery session keeps the legacy JSON contract.
+        getattr(response, "content", None)
+        return await cast(Any, response).json()
+
+    monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _compact_read_response)
     monkeypatch.setattr(proxy_module, "lease_http_session", generations.lease_http_session)
     monkeypatch.setattr(network_recovery_module, "rotate_shared_http_transport", generations.rotate)
     monkeypatch.setattr(
@@ -14275,6 +14283,14 @@ async def test_stream_websocket_network_drop_rotates_generation_for_next_request
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+
+    async def _compact_read_response(response: object) -> dict[str, object]:
+        # The SSE reader consumes ``content``; the failure mock raises from
+        # that property. The recovery session keeps the legacy JSON contract.
+        getattr(response, "content", None)
+        return await cast(Any, response).json()
+
+    monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _compact_read_response)
     monkeypatch.setattr(proxy_module, "lease_http_session", generations.lease_http_session)
     monkeypatch.setattr(network_recovery_module, "rotate_shared_http_transport", generations.rotate)
     monkeypatch.setattr(
@@ -30581,7 +30597,7 @@ async def test_compact_unsafe_network_failure_rotates_generation_for_next_reques
         # The SSE reader consumes ``content``; the failure mock raises from
         # that property. The recovery session keeps the legacy JSON contract.
         getattr(response, "content", None)
-        return await response.json()
+        return await cast(Any, response).json()
 
     monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _compact_read_response)
     monkeypatch.setattr(proxy_module, "lease_http_session", generations.lease_http_session)

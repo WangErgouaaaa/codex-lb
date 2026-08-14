@@ -3633,7 +3633,7 @@ class _CompactCommandTransport:
             self.headers,
             self.access_token,
             upstream_account_id,
-            accept="application/json",
+            accept="text/event-stream",
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
@@ -3642,6 +3642,10 @@ class _CompactCommandTransport:
         # The retired compact endpoint accepted non-streaming JSON; the plain
         # responses endpoint requires streamed SSE.
         payload_dict["stream"] = True
+        # The plain responses endpoint rejects requests where ``store`` is
+        # absent (400 "Store must be set to false"); the serialization layer
+        # keeps the contract store-free, so pin it at the transport.
+        payload_dict["store"] = False
         # The API layer strips the terminal compaction_trigger input item
         # before the compact service; the plain responses endpoint only
         # recognises compaction through that item, so restore it upstream.
@@ -4039,6 +4043,14 @@ async def _read_compact_sse_payload(response: Any) -> dict[str, Any]:
     ChatGPT retired the dedicated compact endpoint and serves compaction as a
     streamed plain responses request. The SSE events are reassembled into the
     legacy ``response.compact`` shape so downstream parsing is unchanged.
+
+    Output items are collected from both ``response.output_item.added`` and
+    ``response.output_item.done`` events by output index (the completed echo
+    carries an empty output array); a non-empty ``response.completed.output``
+    takes precedence when the stream carries the result that way. Terminal
+    ``response.failed`` / ``response.incomplete`` / ``error`` events preserve
+    the upstream error and status instead of being misreported as a malformed
+    stream, and a non-SSE JSON success response is accepted as a fallback.
     """
     content = getattr(response, "content", None)
     if isinstance(content, (bytes, bytearray)):
@@ -4063,11 +4075,21 @@ async def _read_compact_sse_payload(response: Any) -> dict[str, Any]:
             continue
         if isinstance(event, dict):
             events.append(event)
+    # Non-SSE fallback: an intermediate upstream or proxy may answer the
+    # request with a plain JSON body instead of a streamed response.
+    if not events:
+        json_method = getattr(response, "json", None)
+        if callable(json_method):
+            try:
+                data = await cast(Any, json_method)()
+            except Exception:
+                data = None
+            if isinstance(data, dict):
+                return data
     completed: dict[str, Any] | None = None
+    terminal_status: str | None = None
+    terminal_error: dict[str, Any] | None = None
     created_id: str | None = None
-    # The streamed responses contract carries output items in
-    # ``response.output_item.done`` events; ``response.completed`` echoes an
-    # empty ``output`` array, so items must be collected by output index.
     items_by_index: dict[int, dict[str, Any]] = {}
     for event in events:
         event_type = event.get("type")
@@ -4075,7 +4097,7 @@ async def _read_compact_sse_payload(response: Any) -> dict[str, Any]:
             created = event.get("response")
             if isinstance(created, dict) and created.get("id"):
                 created_id = created["id"]
-        elif event_type == "response.output_item.done":
+        elif event_type in {"response.output_item.added", "response.output_item.done"}:
             item = event.get("item")
             if isinstance(item, dict):
                 raw_index = event.get("output_index")
@@ -4083,20 +4105,56 @@ async def _read_compact_sse_payload(response: Any) -> dict[str, Any]:
                 items_by_index[index] = item
         elif event_type == "response.completed":
             completed = event.get("response")
+        elif event_type == "response.failed":
+            failed = event.get("response")
+            if isinstance(failed, dict):
+                terminal_status = "failed"
+                terminal_error = failed.get("error") if isinstance(failed.get("error"), dict) else None
+        elif event_type == "response.incomplete":
+            incomplete = event.get("response")
+            if isinstance(incomplete, dict):
+                terminal_status = "incomplete"
+                terminal_error = incomplete.get("error") if isinstance(incomplete.get("error"), dict) else None
+        elif event_type == "error":
+            terminal_status = "failed"
+            error_payload = event.get("error")
+            if isinstance(error_payload, dict):
+                terminal_error = error_payload
     if not isinstance(completed, dict):
+        if terminal_error is not None or terminal_status is not None:
+            # Preserve the upstream terminal state instead of reporting a
+            # generic parse failure: the error envelope flows to the caller
+            # exactly as the upstream produced it.
+            payload: dict[str, Any] = {
+                "object": "response.compact",
+                "id": created_id,
+                "status": terminal_status or "failed",
+            }
+            if terminal_error is not None:
+                payload["error"] = terminal_error
+            return payload
         raise ValueError("Upstream stream ended without response.completed")
     payload: dict[str, Any] = {
         "object": "response.compact",
         "id": completed.get("id") or created_id,
         "status": completed.get("status") or "completed",
     }
-    output = [items_by_index[index] for index in sorted(items_by_index)] if items_by_index else None
+    # A completed echo may carry a non-empty output array (some upstreams
+    # deliver the result that way); prefer it, else rebuild from the item
+    # events by output index.
+    completed_output = completed.get("output")
+    if isinstance(completed_output, list) and completed_output:
+        output = completed_output
+    elif items_by_index:
+        output = [items_by_index[index] for index in sorted(items_by_index)]
+    else:
+        output = None
     if output:
         payload["output"] = output
-    if completed.get("usage"):
-        payload["usage"] = completed["usage"]
-    if completed.get("error"):
-        payload["error"] = completed["error"]
+    for key in ("usage", "error", "service_tier", "reasoning"):
+        value = completed.get(key)
+        if value is not None:
+            payload[key] = value
     return payload
 
 

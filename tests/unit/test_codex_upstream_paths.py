@@ -64,7 +64,7 @@ class _Response:
 class _CompactResponse:
     status_code = 200
     headers = {"content-type": "application/json"}
-    content = b'{"object": "response.compact", "id": "compact_1"}'
+    content = b'data: {"type":"response.completed","response":{"id":"compact_1"}}\n\n'
 
     def json(self) -> dict[str, str]:
         return {"object": "response.compact", "id": "compact_1"}
@@ -346,7 +346,9 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
 
     assert response.object == "response.compact"
     assert response.id == "compact_1"
-    assert client.calls[0]["url"].endswith("/backend-api/codex/responses/compact")
+    # ChatGPT retired the dedicated compact endpoint (404); compaction is now
+    # a streamed plain responses request carrying the compaction trigger.
+    assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route
     assert client.calls[0]["json"]["model"] == "gpt-5.2"
     assert trace.endpoint_id == "ep_1"

@@ -3615,7 +3615,12 @@ class _CompactCommandTransport:
     async def execute(self) -> CompactResponsePayload:
         settings = get_settings()
         upstream_base = settings.upstream_base_url.rstrip("/")
-        url = f"{upstream_base}/codex/responses/compact"
+        # ChatGPT retired the dedicated ``/codex/responses/compact`` endpoint
+        # (returns 404 since 2026-08-12) and now serves compaction as a plain
+        # streamed ``/codex/responses`` request whose payload carries the
+        # compaction instruction. The response is SSE, folded back into the
+        # legacy ``response.compact`` shape in ``_read_compact_sse_payload``.
+        url = f"{upstream_base}/codex/responses"
         require_route_or_direct_egress_opt_in(
             route=self.route,
             allow_direct_egress=self.allow_direct_egress,
@@ -3634,6 +3639,17 @@ class _CompactCommandTransport:
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
         payload_dict = dict(self.payload.to_payload())
+        # The retired compact endpoint accepted non-streaming JSON; the plain
+        # responses endpoint requires streamed SSE.
+        payload_dict["stream"] = True
+        # The API layer strips the terminal compaction_trigger input item
+        # before the compact service; the plain responses endpoint only
+        # recognises compaction through that item, so restore it upstream.
+        compact_input = payload_dict.get("input")
+        if isinstance(compact_input, list):
+            terminal = compact_input[-1] if compact_input else None
+            if not (isinstance(terminal, dict) and terminal.get("type") == "compaction_trigger"):
+                payload_dict["input"] = [*compact_input, {"type": "compaction_trigger"}]
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,
@@ -3753,7 +3769,7 @@ class _CompactCommandTransport:
                         upstream_status_code=status_code,
                     )
                 try:
-                    data = await _codex_response_json(resp)
+                    data = await _read_compact_sse_payload(resp)
                 except Exception as exc:
                     error_code = "upstream_error"
                     error_message = "Invalid JSON from upstream"
@@ -3831,7 +3847,7 @@ class _CompactCommandTransport:
                         upstream_status_code=resp.status,
                     )
                 try:
-                    data = await resp.json(content_type=None)
+                    data = await _read_compact_sse_payload(resp)
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                     message = str(exc) or "Request to upstream timed out"
                     error_code = process_network_error_code(
@@ -4015,6 +4031,73 @@ class _CompactCommandTransport:
                 failure_exception_type=failure_exception_type,
                 retryable_same_contract=retryable_same_contract,
             )
+
+
+async def _read_compact_sse_payload(response: Any) -> dict[str, Any]:
+    """Fold an upstream ``/codex/responses`` SSE stream into a compact payload.
+
+    ChatGPT retired the dedicated compact endpoint and serves compaction as a
+    streamed plain responses request. The SSE events are reassembled into the
+    legacy ``response.compact`` shape so downstream parsing is unchanged.
+    """
+    content = getattr(response, "content", None)
+    if isinstance(content, (bytes, bytearray)):
+        text = bytes(content).decode("utf-8", "replace")
+    elif isinstance(content, str):
+        text = content
+    elif isinstance(content, aiohttp.StreamReader):
+        chunks = [chunk async for chunk in content]
+        text = b"".join(chunks).decode("utf-8", "replace")
+    else:
+        text = await _codex_response_text(response)
+    events: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    completed: dict[str, Any] | None = None
+    created_id: str | None = None
+    # The streamed responses contract carries output items in
+    # ``response.output_item.done`` events; ``response.completed`` echoes an
+    # empty ``output`` array, so items must be collected by output index.
+    items_by_index: dict[int, dict[str, Any]] = {}
+    for event in events:
+        event_type = event.get("type")
+        if event_type == "response.created":
+            created = event.get("response")
+            if isinstance(created, dict) and created.get("id"):
+                created_id = created["id"]
+        elif event_type == "response.output_item.done":
+            item = event.get("item")
+            if isinstance(item, dict):
+                raw_index = event.get("output_index")
+                index = raw_index if isinstance(raw_index, int) else len(items_by_index)
+                items_by_index[index] = item
+        elif event_type == "response.completed":
+            completed = event.get("response")
+    if not isinstance(completed, dict):
+        raise ValueError("Upstream stream ended without response.completed")
+    payload: dict[str, Any] = {
+        "object": "response.compact",
+        "id": completed.get("id") or created_id,
+        "status": completed.get("status") or "completed",
+    }
+    output = [items_by_index[index] for index in sorted(items_by_index)] if items_by_index else None
+    if output:
+        payload["output"] = output
+    if completed.get("usage"):
+        payload["usage"] = completed["usage"]
+    if completed.get("error"):
+        payload["error"] = completed["error"]
+    return payload
 
 
 def _codex_response_status(response: Any) -> int:

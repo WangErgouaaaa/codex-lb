@@ -1126,17 +1126,21 @@ async def test_responses_websocket_post_connect_network_failures_preserve_safe_c
 class _SseChunkCompactResponse:
     def __init__(self, chunks: list[bytes]) -> None:
         self.status = 200
-        self.content = b"".join(chunks)
+        self.headers: dict[str, str] = {"content-type": "text/event-stream"}
+        self.content = _SseChunkContent(b"".join(chunks))
 
-    async def __aenter__(self):
-        return self
 
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
+class _SseChunkContent:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def iter_chunked(self, size: int):
+        del size
+        yield self._data
 
 
 @pytest.mark.asyncio
-async def test_read_compact_sse_payload_folds_streamed_events() -> None:
+async def test_compact_sse_parser_folds_streamed_events() -> None:
     """output_item.done items are collected by output index and completed
     metadata (usage/service_tier) is preserved."""
     response = _SseChunkCompactResponse(
@@ -1149,8 +1153,14 @@ async def test_read_compact_sse_payload_folds_streamed_events() -> None:
             b'"output":[],"usage":{"input_tokens":10},"service_tier":"default"}}\n\n',
         ]
     )
-    payload = await proxy_module._read_compact_sse_payload(response)
-    assert payload["object"] == "response.compact"
+    payload = cast(
+        dict[str, Any],
+        await proxy_module._compact_response_payload_from_sse(
+            cast(proxy_module.SSEResponse, response),
+            idle_timeout_seconds=30.0,
+            max_event_bytes=1024 * 1024,
+        ),
+    )
     assert payload["id"] == "resp_c1"
     assert payload["status"] == "completed"
     assert payload["output"] == [{"type": "compaction_summary", "id": "cs_1", "encrypted_content": "enc_1"}]
@@ -1159,21 +1169,28 @@ async def test_read_compact_sse_payload_folds_streamed_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_compact_sse_payload_prefers_completed_output_array() -> None:
+async def test_compact_sse_parser_prefers_completed_output_array() -> None:
     response = _SseChunkCompactResponse(
         [
             b'data: {"type":"response.completed","response":{"id":"resp_c2","status":"completed",'
             b'"output":[{"type":"compaction_summary","encrypted_content":"enc_completed"}]}}\n\n',
         ]
     )
-    payload = await proxy_module._read_compact_sse_payload(response)
+    payload = cast(
+        dict[str, Any],
+        await proxy_module._compact_response_payload_from_sse(
+            cast(proxy_module.SSEResponse, response),
+            idle_timeout_seconds=30.0,
+            max_event_bytes=1024 * 1024,
+        ),
+    )
     assert payload["output"] == [{"type": "compaction_summary", "encrypted_content": "enc_completed"}]
 
 
 @pytest.mark.asyncio
-async def test_read_compact_sse_payload_preserves_terminal_errors() -> None:
-    """response.failed / error terminals keep the upstream error instead of
-    being misreported as a malformed stream."""
+async def test_compact_sse_parser_rejects_terminal_errors() -> None:
+    """response.failed / error terminals raise instead of being folded into a
+    fake success payload (the execute path maps the raise to an error)."""
     failed = _SseChunkCompactResponse(
         [
             b'data: {"type":"response.created","response":{"id":"resp_c3"}}\n\n',
@@ -1181,29 +1198,41 @@ async def test_read_compact_sse_payload_preserves_terminal_errors() -> None:
             b'"error":{"code":"upstream_error","message":"boom"}}}\n\n',
         ]
     )
-    payload = await proxy_module._read_compact_sse_payload(failed)
-    assert payload["status"] == "failed"
-    assert payload["error"] == {"code": "upstream_error", "message": "boom"}
+    with pytest.raises(ValueError, match="terminal event"):
+        await proxy_module._compact_response_payload_from_sse(
+            cast(proxy_module.SSEResponse, failed),
+            idle_timeout_seconds=30.0,
+            max_event_bytes=1024 * 1024,
+        )
 
     error_event = _SseChunkCompactResponse(
         [
             b'data: {"type":"error","error":{"code":"rate_limit_exceeded","message":"slow down"}}\n\n',
         ]
     )
-    payload = await proxy_module._read_compact_sse_payload(error_event)
-    assert payload["status"] == "failed"
-    assert payload["error"] == {"code": "rate_limit_exceeded", "message": "slow down"}
+    with pytest.raises(ValueError, match="terminal event"):
+        await proxy_module._compact_response_payload_from_sse(
+            cast(proxy_module.SSEResponse, error_event),
+            idle_timeout_seconds=30.0,
+            max_event_bytes=1024 * 1024,
+        )
 
 
 @pytest.mark.asyncio
-async def test_read_compact_sse_payload_accepts_plain_json_fallback() -> None:
+async def test_compact_sse_parser_accepts_plain_json_fallback() -> None:
     """A non-SSE JSON success response is accepted as a fallback."""
 
     class _JsonCompactFallback:
         status = 200
+        headers: dict[str, str] = {}
 
         async def json(self, *, content_type=None):
             return {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_json"}}
 
-    payload = await proxy_module._read_compact_sse_payload(_JsonCompactFallback())
+    payload = cast(
+        dict[str, Any],
+        await proxy_module._compact_response_payload_from_success_response(
+            _JsonCompactFallback(), idle_timeout_seconds=30.0, max_event_bytes=1024 * 1024
+        ),
+    )
     assert payload == {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_json"}}

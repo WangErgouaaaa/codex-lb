@@ -447,6 +447,7 @@ class _CodexSSEResponse:
     def __init__(self, response: Any) -> None:
         self._response = response
         self.status = _codex_response_status(response)
+        self.headers = _codex_response_headers(response)
         self.content = _CodexSSEContent(response)
 
     async def json(self, *, content_type: str | None = None) -> JsonValue:
@@ -3619,7 +3620,7 @@ class _CompactCommandTransport:
         # (returns 404 since 2026-08-12) and now serves compaction as a plain
         # streamed ``/codex/responses`` request whose payload carries the
         # compaction instruction. The response is SSE, folded back into the
-        # legacy ``response.compact`` shape in ``_read_compact_sse_payload``.
+        # legacy ``response.compact`` shape in the compact SSE parser.
         url = f"{upstream_base}/codex/responses"
         require_route_or_direct_egress_opt_in(
             route=self.route,
@@ -3773,7 +3774,12 @@ class _CompactCommandTransport:
                         upstream_status_code=status_code,
                     )
                 try:
-                    data = await _read_compact_sse_payload(resp)
+                    data = await _compact_response_payload_from_success_response(
+                        _CodexSSEResponse(resp),
+                        idle_timeout_seconds=compact_timeout_seconds or settings.stream_idle_timeout_seconds,
+                        max_event_bytes=settings.max_sse_event_bytes,
+                    )
+                    data = _normalize_compact_response_payload_shape(data)
                 except Exception as exc:
                     error_code = "upstream_error"
                     error_message = "Invalid JSON from upstream"
@@ -3851,7 +3857,12 @@ class _CompactCommandTransport:
                         upstream_status_code=resp.status,
                     )
                 try:
-                    data = await _read_compact_sse_payload(resp)
+                    data = await _compact_response_payload_from_success_response(
+                        resp,
+                        idle_timeout_seconds=compact_timeout_seconds or settings.stream_idle_timeout_seconds,
+                        max_event_bytes=settings.max_sse_event_bytes,
+                    )
+                    data = _normalize_compact_response_payload_shape(data)
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                     message = str(exc) or "Request to upstream timed out"
                     error_code = process_network_error_code(
@@ -4037,125 +4048,146 @@ class _CompactCommandTransport:
             )
 
 
-async def _read_compact_sse_payload(response: Any) -> dict[str, Any]:
-    """Fold an upstream ``/codex/responses`` SSE stream into a compact payload.
+async def _compact_response_payload_from_sse(
+    resp: SSEResponse, idle_timeout_seconds: float, max_event_bytes: int
+) -> JsonValue:
+    last_payload: dict[str, JsonValue] | None = None
+    output_items: dict[int, dict[str, JsonValue]] = {}
+    async for event_block in _iter_sse_events(resp, idle_timeout_seconds, max_event_bytes):
+        payload = parse_sse_data_json(event_block)
+        if payload is None:
+            continue
+        last_payload = payload
+        event_type = payload.get("type")
+        if event_type in {"response.output_item.added", "response.output_item.done"}:
+            output_index = payload.get("output_index")
+            item = payload.get("item")
+            if isinstance(output_index, int) and isinstance(item, dict):
+                output_items[output_index] = dict(item)
+        if event_type == "response.completed":
+            response = payload.get("response")
+            if isinstance(response, dict):
+                existing_output = response.get("output")
+                if output_items and not (isinstance(existing_output, list) and existing_output):
+                    merged_response = dict(response)
+                    merged_response["output"] = [item for _, item in sorted(output_items.items())]
+                    return merged_response
+                return response
+            raise ValueError("response.completed event missing response object")
+        if event_type in {"response.failed", "response.incomplete", "error"}:
+            raise ValueError(f"upstream SSE terminal event {event_type}")
+    if last_payload is not None:
+        raise ValueError("upstream SSE ended before response.completed")
+    raise ValueError("empty upstream SSE response")
 
-    ChatGPT retired the dedicated compact endpoint and serves compaction as a
-    streamed plain responses request. The SSE events are reassembled into the
-    legacy ``response.compact`` shape so downstream parsing is unchanged.
 
-    Output items are collected from both ``response.output_item.added`` and
-    ``response.output_item.done`` events by output index (the completed echo
-    carries an empty output array); a non-empty ``response.completed.output``
-    takes precedence when the stream carries the result that way. Terminal
-    ``response.failed`` / ``response.incomplete`` / ``error`` events preserve
-    the upstream error and status instead of being misreported as a malformed
-    stream, and a non-SSE JSON success response is accepted as a fallback.
-    """
-    content = getattr(response, "content", None)
-    if isinstance(content, (bytes, bytearray)):
-        text = bytes(content).decode("utf-8", "replace")
-    elif isinstance(content, str):
-        text = content
-    elif isinstance(content, aiohttp.StreamReader):
-        chunks = [chunk async for chunk in content]
-        text = b"".join(chunks).decode("utf-8", "replace")
-    else:
-        text = await _codex_response_text(response)
-    events: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        if not line.startswith("data:"):
-            continue
-        raw = line[5:].strip()
-        if not raw:
-            continue
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    # Non-SSE fallback: an intermediate upstream or proxy may answer the
-    # request with a plain JSON body instead of a streamed response.
-    if not events:
-        json_method = getattr(response, "json", None)
-        if callable(json_method):
-            try:
-                data = await cast(Any, json_method)()
-            except Exception:
-                data = None
-            if isinstance(data, dict):
-                return data
-    completed: dict[str, Any] | None = None
-    terminal_status: str | None = None
-    terminal_error: dict[str, Any] | None = None
-    created_id: str | None = None
-    items_by_index: dict[int, dict[str, Any]] = {}
-    for event in events:
-        event_type = event.get("type")
-        if event_type == "response.created":
-            created = event.get("response")
-            if isinstance(created, dict) and created.get("id"):
-                created_id = created["id"]
-        elif event_type in {"response.output_item.added", "response.output_item.done"}:
-            item = event.get("item")
-            if isinstance(item, dict):
-                raw_index = event.get("output_index")
-                index = raw_index if isinstance(raw_index, int) else len(items_by_index)
-                items_by_index[index] = item
-        elif event_type == "response.completed":
-            completed = event.get("response")
-        elif event_type == "response.failed":
-            failed = event.get("response")
-            if isinstance(failed, dict):
-                terminal_status = "failed"
-                terminal_error = failed.get("error") if isinstance(failed.get("error"), dict) else None
-        elif event_type == "response.incomplete":
-            incomplete = event.get("response")
-            if isinstance(incomplete, dict):
-                terminal_status = "incomplete"
-                terminal_error = incomplete.get("error") if isinstance(incomplete.get("error"), dict) else None
-        elif event_type == "error":
-            terminal_status = "failed"
-            error_payload = event.get("error")
-            if isinstance(error_payload, dict):
-                terminal_error = error_payload
-    if not isinstance(completed, dict):
-        if terminal_error is not None or terminal_status is not None:
-            # Preserve the upstream terminal state instead of reporting a
-            # generic parse failure: the error envelope flows to the caller
-            # exactly as the upstream produced it.
-            payload: dict[str, Any] = {
-                "object": "response.compact",
-                "id": created_id,
-                "status": terminal_status or "failed",
-            }
-            if terminal_error is not None:
-                payload["error"] = terminal_error
-            return payload
-        raise ValueError("Upstream stream ended without response.completed")
-    payload: dict[str, Any] = {
-        "object": "response.compact",
-        "id": completed.get("id") or created_id,
-        "status": completed.get("status") or "completed",
+async def _compact_response_payload_from_success_response(
+    resp: Any,
+    *,
+    idle_timeout_seconds: float,
+    max_event_bytes: int,
+) -> JsonValue:
+    headers = _codex_response_headers(resp)
+    content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
+    content = getattr(resp, "content", None)
+    if "text/event-stream" in content_type.lower() or (
+        not content_type and callable(getattr(content, "iter_chunked", None))
+    ):
+        return await _compact_response_payload_from_sse(cast(SSEResponse, resp), idle_timeout_seconds, max_event_bytes)
+    return await _codex_response_json(resp)
+
+
+def _normalize_compact_response_payload_shape(payload: JsonValue) -> JsonValue:
+    if not is_json_mapping(payload):
+        return payload
+    object_value = payload.get("object")
+    if isinstance(object_value, str) and object_value.startswith("response.compact"):
+        return payload
+    compaction_item = _compact_output_item_from_payload(payload)
+    if compaction_item is None:
+        return payload
+    normalized: dict[str, JsonValue] = {
+        "object": "response.compaction",
+        "output": [compaction_item],
     }
-    # A completed echo may carry a non-empty output array (some upstreams
-    # deliver the result that way); prefer it, else rebuild from the item
-    # events by output index.
-    completed_output = completed.get("output")
-    if isinstance(completed_output, list) and completed_output:
-        output = completed_output
-    elif items_by_index:
-        output = [items_by_index[index] for index in sorted(items_by_index)]
-    else:
-        output = None
-    if output:
-        payload["output"] = output
-    for key in ("usage", "error", "service_tier", "reasoning"):
-        value = completed.get(key)
+    for key in ("id", "status", "usage"):
+        value = payload.get(key)
         if value is not None:
-            payload[key] = value
-    return payload
+            normalized[key] = value
+    return normalized
+
+
+def _compact_output_item_from_payload(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    output = payload.get("output")
+    if isinstance(output, list):
+        for raw_item in output:
+            if not is_json_mapping(raw_item):
+                continue
+            item_type = raw_item.get("type")
+            if isinstance(item_type, str) and item_type in {"compaction", "compaction_summary"}:
+                normalized = _normalize_compact_output_item(raw_item)
+                if normalized is not None:
+                    return normalized
+            if item_type == "message":
+                normalized = _compact_output_item_from_message(raw_item)
+                if normalized is not None:
+                    return normalized
+    summary = payload.get("compaction_summary")
+    if is_json_mapping(summary):
+        return _normalize_compact_output_item(summary)
+    return None
+
+
+def _compact_output_item_from_message(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    text = _compact_message_text(item)
+    if not text:
+        return None
+    normalized: dict[str, JsonValue] = {
+        "type": "compaction",
+        "encrypted_content": text,
+    }
+    for key in ("id", "status"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized[key] = value
+    return normalized
+
+
+def _compact_message_text(item: Mapping[str, JsonValue]) -> str | None:
+    direct_text = item.get("text")
+    if isinstance(direct_text, str) and direct_text:
+        return direct_text
+    content = item.get("content")
+    content_parts: list[Mapping[str, JsonValue]]
+    if is_json_mapping(content):
+        content_parts = [content]
+    elif isinstance(content, list):
+        content_parts = [part for part in content if is_json_mapping(part)]
+    else:
+        content_parts = []
+    text_parts: list[str] = []
+    for part in content_parts:
+        text = part.get("text")
+        if isinstance(text, str) and text:
+            text_parts.append(text)
+    if text_parts:
+        return "".join(text_parts)
+    return None
+
+
+def _normalize_compact_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    encrypted_content = item.get("encrypted_content")
+    if not isinstance(encrypted_content, str):
+        return None
+    normalized: dict[str, JsonValue] = {
+        "type": "compaction",
+        "encrypted_content": encrypted_content,
+    }
+    for key in ("id", "status"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            normalized[key] = value
+    return normalized
 
 
 def _codex_response_status(response: Any) -> int:

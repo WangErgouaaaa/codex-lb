@@ -49,11 +49,22 @@ def _make_auth_json(account_id: str, email: str, *, plan_type: str = "plus") -> 
     }
 
 
+class _SseContent:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def iter_chunked(self, size: int):
+        del size
+        for chunk in self._chunks:
+            yield chunk
+
+
 class _SseCompactResponse:
     def __init__(self, chunks: list[bytes]) -> None:
         self.status = 200
         self.reason = "OK"
-        self.content = b"".join(chunks)
+        self.headers: dict[str, str] = {"content-type": "text/event-stream"}
+        self.content = _SseContent(chunks)
 
     async def __aenter__(self):
         return self
@@ -550,7 +561,7 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
 
     assert response.status_code == 200
     body = response.json()
-    assert body["object"] == "response.compact"
+    assert body["object"] == "response.compaction"
     output = body["output"]
     assert isinstance(output, list) and output
     summary_item = output[0]

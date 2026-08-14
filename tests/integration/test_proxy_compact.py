@@ -1425,3 +1425,42 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
 
     assert response.status_code == 200
     assert seen_inputs == [compact_window["output"]]
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_terminal_error_maps_http_status_and_envelope(async_client, monkeypatch):
+    """A rate-limited upstream terminal event surfaces 429 with the full
+    upstream error envelope instead of a generic 502."""
+    email = "compact-terminal@example.com"
+    raw_account_id = "acc_compact_terminal"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    session = _JsonSession(
+        _SseCompactResponse(
+            [
+                b'data: {"type":"response.created","response":{"id":"resp_terminal"}}\n\n',
+                b'data: {"type":"error","error":{"code":"rate_limit_exceeded",'
+                b'"message":"slow down","type":"server_error","param":"x-request-id"}}\n\n',
+            ]
+        )
+    )
+
+    @contextlib.asynccontextmanager
+    async def lease_session(session_override=None):
+        assert session_override is None
+        yield session
+
+    monkeypatch.setattr(proxy_client_module, "lease_http_session", lease_session)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+
+    assert response.status_code == 429
+    error = response.json()["error"]
+    assert error["code"] == "rate_limit_exceeded"
+    assert error["message"] == "slow down"
+    assert error["type"] == "server_error"
+    assert error["param"] == "x-request-id"

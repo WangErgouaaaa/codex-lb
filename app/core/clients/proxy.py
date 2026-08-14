@@ -3809,12 +3809,21 @@ class _CompactCommandTransport:
                     )
                     data = _normalize_compact_response_payload_shape(data)
                 except CompactUpstreamTerminalError as exc:
-                    error_payload = openai_error(
-                        (exc.error or {}).get("code") or "upstream_error",
-                        (exc.error or {}).get("message") or f"Upstream compact {exc.status}",
-                    )
+                    upstream_error = exc.error or {}
+                    error_payload: OpenAIErrorEnvelope = {
+                        "error": {
+                            "message": upstream_error.get("message") or f"Upstream compact {exc.status}",
+                            "type": upstream_error.get("type") or "server_error",
+                            "code": upstream_error.get("code") or "upstream_error",
+                            **{
+                                key: value
+                                for key, value in upstream_error.items()
+                                if key not in {"message", "type", "code"}
+                            },
+                        }
+                    }
                     raise ProxyResponseError(
-                        502,
+                        _compact_terminal_http_status(exc.error),
                         error_payload,
                         failure_phase="upstream_terminal",
                         retryable_same_contract=False,
@@ -3928,12 +3937,21 @@ class _CompactCommandTransport:
                         failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
                     ) from exc
                 except CompactUpstreamTerminalError as exc:
-                    error_payload = openai_error(
-                        (exc.error or {}).get("code") or "upstream_error",
-                        (exc.error or {}).get("message") or f"Upstream compact {exc.status}",
-                    )
+                    upstream_error = exc.error or {}
+                    error_payload: OpenAIErrorEnvelope = {
+                        "error": {
+                            "message": upstream_error.get("message") or f"Upstream compact {exc.status}",
+                            "type": upstream_error.get("type") or "server_error",
+                            "code": upstream_error.get("code") or "upstream_error",
+                            **{
+                                key: value
+                                for key, value in upstream_error.items()
+                                if key not in {"message", "type", "code"}
+                            },
+                        }
+                    }
                     raise ProxyResponseError(
-                        502,
+                        _compact_terminal_http_status(exc.error),
                         error_payload,
                         failure_phase="upstream_terminal",
                         retryable_same_contract=False,
@@ -4104,6 +4122,39 @@ class _CompactCommandTransport:
             )
 
 
+_COMPACT_TERMINAL_ERROR_STATUS: Final[dict[str, int]] = {
+    "invalid_request_error": 400,
+    "content_policy_violation": 400,
+    "authentication_error": 401,
+    "permission_error": 403,
+    "not_found_error": 404,
+    "rate_limit_error": 429,
+    "rate_limit_exceeded": 429,
+    "insufficient_quota": 429,
+}
+
+
+def _compact_terminal_http_status(error: Mapping[str, JsonValue] | None) -> int:
+    """Map an upstream terminal error envelope to an HTTP status.
+
+    Mirrors the API layer's error-code/type mapping so a rate-limited
+    upstream surfaces 429 instead of a generic 502.
+    """
+    if error is None:
+        return 502
+    code = error.get("code")
+    if isinstance(code, str):
+        status = _COMPACT_TERMINAL_ERROR_STATUS.get(code)
+        if status is not None:
+            return status
+    error_type = error.get("type")
+    if isinstance(error_type, str):
+        status = _COMPACT_TERMINAL_ERROR_STATUS.get(error_type)
+        if status is not None:
+            return status
+    return 502
+
+
 class CompactUpstreamTerminalError(ValueError):
     """The upstream stream ended in a terminal error state.
 
@@ -4146,27 +4197,23 @@ async def _compact_response_payload_from_sse(
             raise ValueError("response.completed event missing response object")
         if event_type == "response.failed":
             failed = payload.get("response")
+            failed_error = failed.get("error") if isinstance(failed, dict) else None
             raise CompactUpstreamTerminalError(
                 status="failed",
-                error=failed.get("error")
-                if isinstance(failed, dict) and isinstance(failed.get("error"), dict)
-                else None,
+                error=cast(dict[str, Any] | None, failed_error) if isinstance(failed_error, dict) else None,
             )
         if event_type == "response.incomplete":
             incomplete = payload.get("response")
+            incomplete_error = incomplete.get("error") if isinstance(incomplete, dict) else None
             raise CompactUpstreamTerminalError(
                 status="incomplete",
-                error=(
-                    incomplete.get("error")
-                    if isinstance(incomplete, dict) and isinstance(incomplete.get("error"), dict)
-                    else None
-                ),
+                error=cast(dict[str, Any] | None, incomplete_error) if isinstance(incomplete_error, dict) else None,
             )
         if event_type == "error":
-            error_payload = payload.get("error")
+            error_value = payload.get("error")
             raise CompactUpstreamTerminalError(
                 status="failed",
-                error=error_payload if isinstance(error_payload, dict) else None,
+                error=cast(dict[str, Any] | None, error_value) if isinstance(error_value, dict) else None,
             )
     if last_payload is not None:
         raise ValueError("upstream SSE ended before response.completed")

@@ -432,13 +432,41 @@ class SSEResponseProtocol(Protocol):
 SSEResponse: TypeAlias = aiohttp.ClientResponse | SSEResponseProtocol
 
 
+class _BufferedChunkIterator:
+    """Async chunk iterator over an already-buffered body.
+
+    The routed CodexClient buffers the whole response body into bytes before
+    returning it; the SSE frame parser consumes ``iter_chunked`` chunks, so a
+    buffered body is re-sliced here instead of calling ``bytes.iter_chunked``
+    (which does not exist).
+    """
+
+    def __init__(self, data: bytes, size: int) -> None:
+        self._data = data
+        self._size = size
+        self._offset = 0
+
+    def __aiter__(self) -> "_BufferedChunkIterator":
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._offset >= len(self._data):
+            raise StopAsyncIteration
+        chunk = self._data[self._offset : self._offset + self._size]
+        self._offset += self._size
+        return chunk
+
+
 class _CodexSSEContent:
     def __init__(self, response: Any) -> None:
         self._response = response
 
     def iter_chunked(self, size: int) -> "SSEChunkIteratorProtocol":
-        del size
-        return cast(SSEChunkIteratorProtocol, self._response.content.iter_chunked(1024))
+        content = self._response.content
+        if isinstance(content, (bytes, bytearray, str)):
+            data = content.encode("utf-8") if isinstance(content, str) else bytes(content)
+            return cast(SSEChunkIteratorProtocol, _BufferedChunkIterator(data, size))
+        return cast(SSEChunkIteratorProtocol, content.iter_chunked(1024))
 
 
 class _CodexSSEResponse:
@@ -3780,6 +3808,20 @@ class _CompactCommandTransport:
                         max_event_bytes=settings.max_sse_event_bytes,
                     )
                     data = _normalize_compact_response_payload_shape(data)
+                except CompactUpstreamTerminalError as exc:
+                    error_payload = openai_error(
+                        (exc.error or {}).get("code") or "upstream_error",
+                        (exc.error or {}).get("message") or f"Upstream compact {exc.status}",
+                    )
+                    raise ProxyResponseError(
+                        502,
+                        error_payload,
+                        failure_phase="upstream_terminal",
+                        retryable_same_contract=False,
+                        failure_detail=f"terminal={exc.status}",
+                        failure_exception_type=type(exc).__name__,
+                        upstream_status_code=status_code,
+                    ) from exc
                 except Exception as exc:
                     error_code = "upstream_error"
                     error_message = "Invalid JSON from upstream"
@@ -3884,6 +3926,20 @@ class _CompactCommandTransport:
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=resp.status,
                         failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
+                    ) from exc
+                except CompactUpstreamTerminalError as exc:
+                    error_payload = openai_error(
+                        (exc.error or {}).get("code") or "upstream_error",
+                        (exc.error or {}).get("message") or f"Upstream compact {exc.status}",
+                    )
+                    raise ProxyResponseError(
+                        502,
+                        error_payload,
+                        failure_phase="upstream_terminal",
+                        retryable_same_contract=False,
+                        failure_detail=f"terminal={exc.status}",
+                        failure_exception_type=type(exc).__name__,
+                        upstream_status_code=status_code,
                     ) from exc
                 except Exception as exc:
                     error_code = "upstream_error"
@@ -4048,6 +4104,20 @@ class _CompactCommandTransport:
             )
 
 
+class CompactUpstreamTerminalError(ValueError):
+    """The upstream stream ended in a terminal error state.
+
+    Carries the upstream terminal status and error envelope so the execute
+    path can surface the real code/message instead of a generic parse
+    failure.
+    """
+
+    def __init__(self, *, status: str, error: dict[str, Any] | None = None) -> None:
+        super().__init__(f"upstream SSE terminal event {status}")
+        self.status = status
+        self.error = error
+
+
 async def _compact_response_payload_from_sse(
     resp: SSEResponse, idle_timeout_seconds: float, max_event_bytes: int
 ) -> JsonValue:
@@ -4074,8 +4144,30 @@ async def _compact_response_payload_from_sse(
                     return merged_response
                 return response
             raise ValueError("response.completed event missing response object")
-        if event_type in {"response.failed", "response.incomplete", "error"}:
-            raise ValueError(f"upstream SSE terminal event {event_type}")
+        if event_type == "response.failed":
+            failed = payload.get("response")
+            raise CompactUpstreamTerminalError(
+                status="failed",
+                error=failed.get("error")
+                if isinstance(failed, dict) and isinstance(failed.get("error"), dict)
+                else None,
+            )
+        if event_type == "response.incomplete":
+            incomplete = payload.get("response")
+            raise CompactUpstreamTerminalError(
+                status="incomplete",
+                error=(
+                    incomplete.get("error")
+                    if isinstance(incomplete, dict) and isinstance(incomplete.get("error"), dict)
+                    else None
+                ),
+            )
+        if event_type == "error":
+            error_payload = payload.get("error")
+            raise CompactUpstreamTerminalError(
+                status="failed",
+                error=error_payload if isinstance(error_payload, dict) else None,
+            )
     if last_payload is not None:
         raise ValueError("upstream SSE ended before response.completed")
     raise ValueError("empty upstream SSE response")
@@ -4110,7 +4202,7 @@ def _normalize_compact_response_payload_shape(payload: JsonValue) -> JsonValue:
         "object": "response.compaction",
         "output": [compaction_item],
     }
-    for key in ("id", "status", "usage"):
+    for key in ("id", "status", "usage", "service_tier"):
         value = payload.get(key)
         if value is not None:
             normalized[key] = value

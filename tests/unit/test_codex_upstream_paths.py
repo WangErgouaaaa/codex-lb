@@ -1198,24 +1198,28 @@ async def test_compact_sse_parser_rejects_terminal_errors() -> None:
             b'"error":{"code":"upstream_error","message":"boom"}}}\n\n',
         ]
     )
-    with pytest.raises(ValueError, match="terminal event"):
+    with pytest.raises(proxy_module.CompactUpstreamTerminalError) as exc_info:
         await proxy_module._compact_response_payload_from_sse(
             cast(proxy_module.SSEResponse, failed),
             idle_timeout_seconds=30.0,
             max_event_bytes=1024 * 1024,
         )
+    assert exc_info.value.status in {"failed", "incomplete", "response.failed", "error"}
+    assert isinstance(exc_info.value.error, dict)
 
     error_event = _SseChunkCompactResponse(
         [
             b'data: {"type":"error","error":{"code":"rate_limit_exceeded","message":"slow down"}}\n\n',
         ]
     )
-    with pytest.raises(ValueError, match="terminal event"):
+    with pytest.raises(proxy_module.CompactUpstreamTerminalError) as exc_info:
         await proxy_module._compact_response_payload_from_sse(
             cast(proxy_module.SSEResponse, error_event),
             idle_timeout_seconds=30.0,
             max_event_bytes=1024 * 1024,
         )
+    assert exc_info.value.status in {"failed", "incomplete", "response.failed", "error"}
+    assert isinstance(exc_info.value.error, dict)
 
 
 @pytest.mark.asyncio
@@ -1236,3 +1240,64 @@ async def test_compact_sse_parser_accepts_plain_json_fallback() -> None:
         ),
     )
     assert payload == {"object": "response.compaction", "compaction_summary": {"encrypted_content": "enc_json"}}
+
+
+@pytest.mark.asyncio
+async def test_compact_sse_parser_accepts_buffered_bytes_body() -> None:
+    """The routed CodexClient buffers the body into bytes before returning;
+    the parser must slice the buffered body instead of calling
+    bytes.iter_chunked."""
+    chunks = [
+        b'data: {"type":"response.created","response":{"id":"resp_buf"}}\n\n',
+        b'data: {"type":"response.output_item.done","output_index":0,"item":'
+        b'{"type":"compaction_summary","id":"cs_buf","encrypted_content":"enc_buf"}}\n\n',
+        b'data: {"type":"response.completed","response":{"id":"resp_buf","status":"completed","output":[]}}\n\n',
+    ]
+    response = proxy_module._CodexSSEResponse(
+        _BufferedBodyResponse(headers={"content-type": "text/event-stream"}, body=b"".join(chunks))
+    )
+    payload = cast(
+        dict[str, Any],
+        await proxy_module._compact_response_payload_from_sse(
+            cast(proxy_module.SSEResponse, response),
+            idle_timeout_seconds=30.0,
+            max_event_bytes=1024 * 1024,
+        ),
+    )
+    assert payload["output"] == [{"type": "compaction_summary", "id": "cs_buf", "encrypted_content": "enc_buf"}]
+
+
+@pytest.mark.asyncio
+async def test_compact_sse_parser_accepts_untagged_iterable_body() -> None:
+    """A body without a Content-Type header but with an iterable chunk source
+    is treated as SSE (mirrors the official 4565ae64 behavior)."""
+
+    class _UntaggedSseResponse:
+        status = 200
+        headers: dict[str, str] = {}
+        content = _SseChunkContent(
+            b'data: {"type":"response.completed","response":{"id":"resp_untagged","status":"completed"}}\n\n'
+        )
+
+    payload = cast(
+        dict[str, Any],
+        await proxy_module._compact_response_payload_from_success_response(
+            _UntaggedSseResponse(),
+            idle_timeout_seconds=30.0,
+            max_event_bytes=1024 * 1024,
+        ),
+    )
+    assert payload["id"] == "resp_untagged"
+
+
+class _BufferedBodyResponse:
+    """Mimics CodexClient._BufferedResponse: content is a bytes body."""
+
+    def __init__(self, *, headers: dict[str, str], body: bytes) -> None:
+        self.status = 200
+        self.status_code = 200
+        self.headers = headers
+        self.content = body
+
+    async def read(self) -> bytes:
+        return self.content

@@ -41,10 +41,18 @@ _INTERLEAVED_REASONING_PART_TYPES = frozenset({"reasoning", "reasoning_content",
 _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _TOOL_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text", "refusal"})
 _COMPACT_STATE_TOOL_NAMES = frozenset({"create_goal", "get_goal", "update_goal", "update_plan"})
-_COMPACT_TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
+_COMPACT_TOOL_CALL_ITEM_TYPES = frozenset(
+    {"function_call", "custom_tool_call", "apply_patch_call", "tool_search_call", "web_search_call"}
+)
 _TOOL_CALL_ITEM_TYPES = frozenset({"function_call", "custom_tool_call", "apply_patch_call"})
 _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES = frozenset(
-    {"function_call_output", "custom_tool_call_output", "apply_patch_call_output"}
+    {
+        "function_call_output",
+        "custom_tool_call_output",
+        "apply_patch_call_output",
+        "tool_search_output",
+        "web_search_output",
+    }
 )
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
@@ -948,12 +956,48 @@ def _sort_keys_recursive(value: JsonValue) -> JsonValue:
     return value
 
 
+def _strip_orphan_tool_outputs(payload: MutableJsonObject) -> None:
+    """Drop tool outputs whose matching call is absent from the payload.
+
+    The upstream rejects a tool_search_output/web_search_output without a
+    matching call in the same input (400 "No tool call found for tool search
+    output"). A client may assemble a compact body whose early search calls
+    live only in its own compaction summary, leaving orphan outputs behind;
+    stripping them keeps the compact request acceptable upstream.
+    """
+    input_value = payload.get("input")
+    if not is_json_list(input_value):
+        return
+    call_ids = {
+        item["call_id"]
+        for item in input_value
+        if is_json_mapping(item)
+        and isinstance(item.get("call_id"), str)
+        and item.get("type") in _COMPACT_TOOL_CALL_ITEM_TYPES
+    }
+    kept: list[JsonValue] = []
+    changed = False
+    for item in input_value:
+        if (
+            is_json_mapping(item)
+            and item.get("type") in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"] not in call_ids
+        ):
+            changed = True
+            continue
+        kept.append(item)
+    if changed:
+        payload["input"] = kept
+
+
 def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJsonObject:
     payload = _strip_unsupported_fields(payload)
     normalized_payload = _normalize_responses_input_instructions(payload)
     if is_json_mapping(normalized_payload):
         payload = dict(normalized_payload)
     _trim_compact_input_for_upstream(payload)
+    _strip_orphan_tool_outputs(payload)
     # ``store`` is a transport-level concern: the plain responses endpoint
     # (which serves compaction since 2026-08-12) rejects requests where
     # ``store`` is absent, so the compact transport sets it explicitly.

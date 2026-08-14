@@ -2548,3 +2548,113 @@ def test_extract_input_image_file_references_collects_tool_output_paths():
         (0, None, "file_tool"),
         (0, None, "file_nested"),
     ]
+
+
+def test_compact_trimming_does_not_leave_orphan_tool_search_output():
+    """A trimmed compact must never retain a tool_search_output whose
+    tool_search_call was trimmed away (upstream rejects it with 400 'No tool
+    call found for tool search output')."""
+    input_items = [
+        {"role": "user", "content": "initial goal and instructions"},
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search_1",
+            "arguments": {"query": "docs"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {"role": "assistant", "content": "x" * 500_000},
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search_1",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+        },
+        {"role": "user", "content": "latest request"},
+    ]
+    request = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": input_items})
+    dumped_input = request.to_payload()["input"]
+    assert isinstance(dumped_input, list)
+    for item in dumped_input:
+        if not isinstance(item, dict) or item.get("type") != "tool_search_output":
+            continue
+        call_id = item.get("call_id")
+        assert any(
+            isinstance(c, dict) and c.get("type") == "tool_search_call" and c.get("call_id") == call_id
+            for c in dumped_input
+        ), f"orphan tool_search_output call_id={call_id}"
+
+
+def test_compact_trimming_does_not_leave_orphan_web_search_output():
+    input_items = [
+        {"role": "user", "content": "initial goal and instructions"},
+        {
+            "type": "web_search_call",
+            "call_id": "call_web_1",
+            "action": {"type": "search", "query": "docs"},
+            "status": "completed",
+        },
+        {"role": "assistant", "content": "x" * 500_000},
+        {
+            "type": "web_search_output",
+            "call_id": "call_web_1",
+            "status": "completed",
+            "results": [],
+        },
+        {"role": "user", "content": "latest request"},
+    ]
+    request = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": input_items})
+    dumped_input = request.to_payload()["input"]
+    assert isinstance(dumped_input, list)
+    for item in dumped_input:
+        if not isinstance(item, dict) or item.get("type") != "web_search_output":
+            continue
+        call_id = item.get("call_id")
+        assert any(
+            isinstance(c, dict) and c.get("type") == "web_search_call" and c.get("call_id") == call_id
+            for c in dumped_input
+        ), f"orphan web_search_output call_id={call_id}"
+
+
+def test_compact_strips_orphan_tool_search_output_from_client_input():
+    """A client compact body carrying a tool_search_output without its call
+    is cleaned before dispatch (upstream rejects orphans with 400)."""
+    input_items = [
+        {"role": "user", "content": "initial goal"},
+        {
+            "type": "tool_search_output",
+            "call_id": "call_orphan_1",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+        },
+        {"role": "user", "content": "latest request"},
+    ]
+    request = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": input_items})
+    dumped_input = request.to_payload()["input"]
+    assert isinstance(dumped_input, list)
+    assert dumped_input == [input_items[0], input_items[2]]
+
+
+def test_compact_preserves_tool_search_output_with_matching_call():
+    input_items = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_kept_1",
+            "arguments": {"query": "docs"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_kept_1",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+        },
+    ]
+    request = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": input_items})
+    dumped_input = request.to_payload()["input"]
+    assert isinstance(dumped_input, list)
+    assert dumped_input == input_items

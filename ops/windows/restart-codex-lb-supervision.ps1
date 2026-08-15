@@ -40,6 +40,17 @@ $mainWatchdogTaskName = "$TaskNamePrefix-main-watchdog"
 $shimWatchdogTaskName = "$TaskNamePrefix-shim-watchdog"
 $mainProbe = "http://127.0.0.1:$MainPort/v1/models"
 $shimProbe = "http://127.0.0.1:$ShimPort/v1/models"
+$normalizedLegacyTaskNames = @(
+    foreach ($legacyTaskName in $LegacyTaskNames) {
+        foreach ($value in $legacyTaskName.Split(",")) {
+            $trimmedValue = $value.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmedValue)) {
+                $trimmedValue
+            }
+        }
+    }
+)
+$LegacyTaskNames = @($normalizedLegacyTaskNames | Select-Object -Unique)
 
 $plan = [pscustomobject]@{
     repo_root = $resolvedRepoRoot

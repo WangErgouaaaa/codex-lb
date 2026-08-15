@@ -415,6 +415,33 @@ def test_supervised_restart_rolls_back_legacy_or_restores_watchdogs() -> None:
     assert '"127.0.0.1"' in restart
 
 
+def test_supervised_restart_normalizes_comma_delimited_legacy_tasks(tmp_path: Path) -> None:
+    restart = OPS_ROOT / "restart-codex-lb-supervision.ps1"
+    result = _run_powershell(
+        restart,
+        "-RepoRoot",
+        str(REPO_ROOT),
+        "-WorkspaceRoot",
+        str(REPO_ROOT.parent),
+        "-DataRoot",
+        str(tmp_path / "data root"),
+        "-CodexHome",
+        str(tmp_path / "codex home"),
+        "-EncryptionKeyFile",
+        str(tmp_path / "encryption.key"),
+        "-MainPort",
+        "2456",
+        "-ShimPort",
+        "15957",
+        "-LegacyTaskNames",
+        "legacy-a,legacy-b",
+        "-DryRun",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["legacy_tasks"] == ["legacy-a", "legacy-b"]
+
+
 def test_recovery_budget_covers_production_sized_database_startup() -> None:
     installer = (OPS_ROOT / "install-codex-lb-supervision.ps1").read_text(encoding="utf-8")
     restart = (OPS_ROOT / "restart-codex-lb-supervision.ps1").read_text(encoding="utf-8")

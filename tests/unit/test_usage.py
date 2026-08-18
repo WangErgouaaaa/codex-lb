@@ -45,6 +45,8 @@ def test_normalize_usage_window_defaults():
 def test_capacity_for_plan():
     assert capacity_for_plan("plus", "5h") is not None
     assert capacity_for_plan("plus", "7d") is not None
+    assert capacity_for_plan("chatgptplusplan", "5h") == pytest.approx(225.0)
+    assert capacity_for_plan("chatgptplusplan", "7d") == pytest.approx(7560.0)
     assert capacity_for_plan("prolite", "5h") == pytest.approx(1125.0)
     assert capacity_for_plan("prolite", "7d") == pytest.approx(37800.0)
     assert capacity_for_plan("k12", "5h") == pytest.approx(225.0)

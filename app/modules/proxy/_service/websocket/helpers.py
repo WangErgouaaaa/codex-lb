@@ -503,6 +503,8 @@ def _record_websocket_continuity_completion(
     request_state: _WebSocketRequestState,
     response_id: str | None,
 ) -> None:
+    continuity_state.http_stream_active_turn_replay_zlib = None
+    continuity_state.http_stream_active_turn_replay_recorded_at = None
     if response_id is None:
         continuity_state.last_completed_response_id = None
         continuity_state.last_completed_input_count = 0

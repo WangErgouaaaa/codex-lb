@@ -33,6 +33,7 @@ from app.modules.proxy._service.observability import (
     _record_continuity_fail_closed,
     _record_upstream_transport_decision,
 )
+from app.modules.proxy._service.streaming.continuity import _retained_http_stream_fresh_replay
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
@@ -424,6 +425,11 @@ class _StreamingRetryMixin:
             headers=headers,
             api_key=api_key,
         )
+        if verified_fresh_replay_payload is None:
+            verified_fresh_replay_payload = _retained_http_stream_fresh_replay(
+                continuity_state,
+                payload,
+            )
 
         async def _release_tracked_stream_lease(lease: AccountLease | None) -> None:
             if lease is None:
@@ -531,7 +537,7 @@ class _StreamingRetryMixin:
             )
             settled = await _settle_stream_usage_before_pending_penalty(settlement)
 
-        def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
+        def _move_verified_fresh_replay_from_owner(*, account_id: str | None, outcome: str) -> bool:
             # A locally verified full replay may leave either an explicitly
             # resolved owner or a CODEX_SESSION hard-sticky owner. The failed
             # owner stays excluded so sticky selection cannot loop back to it.
@@ -546,7 +552,8 @@ class _StreamingRetryMixin:
                 return False
             payload = verified_fresh_replay_payload
             verified_fresh_replay_payload = None
-            excluded_account_ids.add(account_id)
+            if account_id is not None:
+                excluded_account_ids.add(account_id)
             preferred_account_id = None
             require_preferred_account = False
             headers = {key: value for key, value in headers.items() if key.lower() != "x-codex-turn-state"}
@@ -1135,6 +1142,16 @@ class _StreamingRetryMixin:
                             request_id,
                             transient_failed_account_id,
                         )
+                        continue
+                    if (
+                        not account
+                        and selection.error_code == "hard_affinity_saturated"
+                        and verified_fresh_replay_payload is not None
+                        and _move_verified_fresh_replay_from_owner(
+                            account_id=preferred_account_id,
+                            outcome="owner_unavailable_before_attempt",
+                        )
+                    ):
                         continue
                     if (
                         not account

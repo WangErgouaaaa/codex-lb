@@ -67,6 +67,7 @@ from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service import warmup as proxy_warmup_service
 from app.modules.proxy._service.http_bridge import request_submit as proxy_http_bridge_request_submit
 from app.modules.proxy._service.http_bridge import service_stubs as proxy_http_bridge_service_stubs
+from app.modules.proxy._service.streaming import continuity as streaming_continuity_module
 from app.modules.proxy._service.streaming import helpers as streaming_helpers_module
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.proxy._service.support import (
@@ -9527,6 +9528,8 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
         upstream_compact_timeout_seconds = 12.0
         image_inline_fetch_enabled = True
         trace_channels = frozenset()
+        max_sse_event_bytes = 16 * 1024 * 1024
+        stream_idle_timeout_seconds = 7200.0
 
     inline_ran = False
     recorded: dict[str, float | None] = {}
@@ -9549,10 +9552,6 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
     monkeypatch.setattr(proxy_module.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
 
-    async def _legacy_compact_read(response: object) -> dict[str, object]:
-        return await cast(Any, response).json()
-
-    monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _legacy_compact_read)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", fake_complete)
 
     payload = proxy_module.ResponsesCompactRequest.model_validate(
@@ -9591,14 +9590,12 @@ async def test_compact_responses_derives_lite_http_header_from_additional_tools(
         upstream_compact_timeout_seconds = 12.0
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
+        max_sse_event_bytes = 16 * 1024 * 1024
+        stream_idle_timeout_seconds = 7200.0
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
 
-    async def _legacy_compact_read(response: object) -> dict[str, object]:
-        return await cast(Any, response).json()
-
-    monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _legacy_compact_read)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
 
     additional_tools = {
@@ -9664,6 +9661,8 @@ async def test_compact_responses_rejects_image_inlining_that_exceeds_wire_budget
         upstream_compact_timeout_seconds = 12.0
         image_inline_fetch_enabled = True
         trace_channels = frozenset()
+        max_sse_event_bytes = 16 * 1024 * 1024
+        stream_idle_timeout_seconds = 7200.0
 
     async def fake_inline(payload_dict, session, connect_timeout):
         del payload_dict, session, connect_timeout
@@ -9727,6 +9726,8 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
         upstream_compact_timeout_seconds = 123.0
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
+        max_sse_event_bytes = 16 * 1024 * 1024
+        stream_idle_timeout_seconds = 7200.0
 
     class _TimeoutCompactResponse:
         status = 200
@@ -9743,10 +9744,6 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
 
-    async def _legacy_compact_read(response: object) -> dict[str, object]:
-        return await cast(Any, response).json()
-
-    monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _legacy_compact_read)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
 
     payload = proxy_module.ResponsesCompactRequest.model_validate(
@@ -9782,14 +9779,12 @@ async def test_compact_responses_defaults_to_no_configured_request_timeout(monke
         upstream_compact_timeout_seconds = None
         image_inline_fetch_enabled = False
         trace_channels = frozenset()
+        max_sse_event_bytes = 16 * 1024 * 1024
+        stream_idle_timeout_seconds = 7200.0
 
     monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
 
-    async def _legacy_compact_read(response: object) -> dict[str, object]:
-        return await cast(Any, response).json()
-
-    monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _legacy_compact_read)
     monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
 
     payload = proxy_module.ResponsesCompactRequest.model_validate(
@@ -14203,13 +14198,6 @@ async def test_stream_post_dispatch_network_failure_rotates_generation_for_next_
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
 
-    async def _compact_read_response(response: object) -> dict[str, object]:
-        # The SSE reader consumes ``content``; the failure mock raises from
-        # that property. The recovery session keeps the legacy JSON contract.
-        getattr(response, "content", None)
-        return await cast(Any, response).json()
-
-    monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _compact_read_response)
     monkeypatch.setattr(proxy_module, "lease_http_session", generations.lease_http_session)
     monkeypatch.setattr(network_recovery_module, "rotate_shared_http_transport", generations.rotate)
     monkeypatch.setattr(
@@ -14284,13 +14272,6 @@ async def test_stream_websocket_network_drop_rotates_generation_for_next_request
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
 
-    async def _compact_read_response(response: object) -> dict[str, object]:
-        # The SSE reader consumes ``content``; the failure mock raises from
-        # that property. The recovery session keeps the legacy JSON contract.
-        getattr(response, "content", None)
-        return await cast(Any, response).json()
-
-    monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _compact_read_response)
     monkeypatch.setattr(proxy_module, "lease_http_session", generations.lease_http_session)
     monkeypatch.setattr(network_recovery_module, "rotate_shared_http_transport", generations.rotate)
     monkeypatch.setattr(
@@ -30006,6 +29987,275 @@ async def test_stream_verified_turn_state_full_replay_moves_off_owner_after_prev
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("owner_unavailable_before_stream", [False, True])
+async def test_stream_retained_active_turn_replay_moves_partial_tool_output_off_quota_owner(
+    monkeypatch,
+    owner_unavailable_before_stream,
+):
+    settings = _make_proxy_settings()
+    settings.upstream_stream_transport = "http"
+    settings.http_responses_session_bridge_enabled = False
+    settings.http_responses_session_bridge_idle_ttl_seconds = 60.0
+    settings.http_responses_session_bridge_codex_idle_ttl_seconds = 60.0
+    settings.http_responses_session_bridge_max_sessions = 16
+    settings.http_responses_session_bridge_queue_limit = 8
+    settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds = 60.0
+    settings.http_responses_session_bridge_gateway_safe_mode = False
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner_account = _make_account("acc_stream_retained_turn_owner")
+    replacement_account = _make_account("acc_stream_retained_turn_replacement")
+    session_id = "sid_stream_retained_active_turn"
+    turn_state = "turn_stream_retained_active_turn"
+    first_input: list[JsonValue] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "inspect the repository"}],
+        }
+    ]
+    tool_call: JsonValue = {
+        "type": "custom_tool_call",
+        "id": "ctc_owner_scoped",
+        "call_id": "call_retained_active_turn",
+        "name": "shell",
+        "input": "rg -n TODO .",
+        "status": "completed",
+    }
+    tool_output: JsonValue = {
+        "type": "custom_tool_call_output",
+        "call_id": "call_retained_active_turn",
+        "output": "no matches",
+        "status": "completed",
+    }
+    selection_calls: list[dict[str, object]] = []
+    streamed_payloads: list[ResponsesRequest] = []
+    streamed_headers: list[Mapping[str, str]] = []
+    first_request_completed = False
+    owner_stream_attempts = 0
+
+    def sse(payload: dict[str, JsonValue]) -> str:
+        return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+    async def fake_select_account(**kwargs):
+        selection_calls.append(dict(kwargs))
+        if not first_request_completed:
+            return AccountSelection(account=owner_account, error_message=None)
+        excluded_account_ids = set(cast(set[str], kwargs.get("exclude_account_ids") or set()))
+        if excluded_account_ids == {owner_account.id} and kwargs.get("reallocate_sticky") is True:
+            return AccountSelection(account=replacement_account, error_message=None)
+        if owner_unavailable_before_stream and kwargs.get("reallocate_sticky") is not True:
+            return AccountSelection(
+                account=None,
+                error_message="No available accounts",
+                error_code="hard_affinity_saturated",
+            )
+        if owner_unavailable_before_stream and kwargs.get("reallocate_sticky") is True:
+            return AccountSelection(account=replacement_account, error_message=None)
+        if excluded_account_ids:
+            return AccountSelection(
+                account=None,
+                error_message="Hard affinity owner account is unavailable",
+                error_code="hard_affinity_saturated",
+            )
+        return AccountSelection(account=owner_account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        nonlocal owner_stream_attempts
+        del access_token, base_url, raise_for_status, kwargs
+        streamed_payloads.append(payload)
+        streamed_headers.append(dict(headers))
+        if account_id == owner_account.chatgpt_account_id:
+            owner_stream_attempts += 1
+            if owner_stream_attempts == 1:
+                yield sse(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": tool_call,
+                    }
+                )
+                yield sse(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_retained_active_turn_owner",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    }
+                )
+                return
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error(
+                    "usage_limit_reached",
+                    "usage limit reached",
+                    error_type="usage_limit_reached",
+                ),
+            )
+        assert account_id == replacement_account.chatgpt_account_id
+        yield sse(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_retained_active_turn_replacement",
+                    "status": "completed",
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(return_value={"failure_class": "rate_limit"}))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    first_payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test retained active turn replay",
+            "input": first_input,
+            "stream": True,
+        }
+    )
+    first_chunks = [
+        chunk
+        async for chunk in service.stream_http_responses(
+            first_payload,
+            {"session_id": session_id},
+            codex_session_affinity=True,
+            downstream_turn_state=turn_state,
+        )
+    ]
+    assert json.loads(first_chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    continuity_state = service._websocket_continuity_index[(session_id, None)]
+    assert continuity_state.http_stream_active_turn_replay_zlib is not None
+    first_request_completed = True
+
+    partial_payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test retained active turn replay",
+            "input": [tool_output],
+            "stream": True,
+        }
+    )
+    chunks = [
+        chunk
+        async for chunk in service.stream_http_responses(
+            partial_payload,
+            {"session_id": session_id, "x-codex-turn-state": turn_state},
+            codex_session_affinity=True,
+            downstream_turn_state=turn_state,
+        )
+    ]
+
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert streamed_payloads[-1].input == [
+        *first_input,
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_retained_active_turn",
+            "name": "shell",
+            "input": "rg -n TODO .",
+            "status": "completed",
+        },
+        tool_output,
+    ]
+    if owner_unavailable_before_stream:
+        assert owner_stream_attempts == 1
+    else:
+        assert owner_stream_attempts == 2
+        assert streamed_headers[-2]["x-codex-turn-state"] == turn_state
+    assert "x-codex-turn-state" not in {key.lower() for key in streamed_headers[-1]}
+    if owner_unavailable_before_stream:
+        assert any(call.get("reallocate_sticky") is True for call in selection_calls)
+    else:
+        assert any(
+            set(cast(set[str], call.get("exclude_account_ids") or set())) == {owner_account.id}
+            for call in selection_calls
+        )
+    assert continuity_state.http_stream_active_turn_replay_zlib is None
+    assert continuity_state.http_stream_active_turn_replay_recorded_at is None
+
+
+def test_retained_active_turn_replay_fails_closed_for_unmatched_tool_output() -> None:
+    continuity_state = proxy_service._WebSocketContinuityState()
+    retained_input: list[JsonValue] = [
+        {"role": "user", "content": "inspect the repository"},
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_expected",
+            "name": "shell",
+            "input": "rg -n TODO .",
+            "status": "completed",
+        },
+    ]
+    streaming_continuity_module._store_http_stream_active_turn_replay(continuity_state, retained_input)
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test retained active turn replay",
+            "input": [
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_unrelated",
+                    "output": "unrelated output",
+                }
+            ],
+            "stream": True,
+        }
+    )
+
+    assert streaming_continuity_module._retained_http_stream_fresh_replay(continuity_state, payload) is None
+
+
+def test_retained_active_turn_replay_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    continuity_state = proxy_service._WebSocketContinuityState()
+    retained_input: list[JsonValue] = [
+        {"role": "user", "content": "inspect the repository"},
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_expired",
+            "name": "shell",
+            "input": "rg -n TODO .",
+            "status": "completed",
+        },
+    ]
+    streaming_continuity_module._store_http_stream_active_turn_replay(continuity_state, retained_input)
+    recorded_at = continuity_state.http_stream_active_turn_replay_recorded_at
+    assert recorded_at is not None
+    monkeypatch.setattr(
+        streaming_continuity_module.time,
+        "monotonic",
+        lambda: recorded_at + streaming_continuity_module._HTTP_STREAM_ACTIVE_TURN_REPLAY_TTL_SECONDS + 1,
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test retained active turn replay",
+            "input": [
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_expired",
+                    "output": "expired output",
+                }
+            ],
+            "stream": True,
+        }
+    )
+
+    assert streaming_continuity_module._retained_http_stream_fresh_replay(continuity_state, payload) is None
+    assert continuity_state.http_stream_active_turn_replay_zlib is None
+    assert continuity_state.http_stream_active_turn_replay_recorded_at is None
+
+
+@pytest.mark.asyncio
 async def test_stream_verified_fresh_replay_moves_off_owner_after_refresh_connect_failure(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -30593,13 +30843,6 @@ async def test_compact_unsafe_network_failure_rotates_generation_for_next_reques
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
 
-    async def _compact_read_response(response: object) -> dict[str, object]:
-        # The SSE reader consumes ``content``; the failure mock raises from
-        # that property. The recovery session keeps the legacy JSON contract.
-        getattr(response, "content", None)
-        return await cast(Any, response).json()
-
-    monkeypatch.setattr(proxy_module, "_read_compact_sse_payload", _compact_read_response)
     monkeypatch.setattr(proxy_module, "lease_http_session", generations.lease_http_session)
     monkeypatch.setattr(network_recovery_module, "rotate_shared_http_transport", generations.rotate)
     monkeypatch.setattr(

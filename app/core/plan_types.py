@@ -29,6 +29,10 @@ ACCOUNT_PLAN_EQUIVALENTS: Final[dict[str, frozenset[str]]] = {
     "k12": frozenset({"edu"}),
 }
 
+ACCOUNT_PLAN_ALIASES: Final[dict[str, str]] = {
+    "chatgptplusplan": "plus",
+}
+
 
 def _clean_plan_type(value: str | None) -> str | None:
     if value is None:
@@ -41,7 +45,7 @@ def normalize_account_plan_type(value: str | None) -> str | None:
     cleaned = _clean_plan_type(value)
     if not cleaned:
         return None
-    normalized = cleaned.lower()
+    normalized = ACCOUNT_PLAN_ALIASES.get(cleaned.lower(), cleaned.lower())
     return normalized if normalized in ACCOUNT_PLAN_TYPES else None
 
 
@@ -49,7 +53,7 @@ def canonicalize_account_plan_type(value: str | None) -> str | None:
     cleaned = _clean_plan_type(value)
     if not cleaned:
         return None
-    normalized = cleaned.lower()
+    normalized = ACCOUNT_PLAN_ALIASES.get(cleaned.lower(), cleaned.lower())
     if normalized in ACCOUNT_PLAN_TYPES:
         return normalized
     return cleaned
@@ -67,7 +71,7 @@ def normalize_rate_limit_plan_type(value: str | None) -> str | None:
     cleaned = _clean_plan_type(value)
     if not cleaned:
         return None
-    normalized = cleaned.lower()
+    normalized = ACCOUNT_PLAN_ALIASES.get(cleaned.lower(), cleaned.lower())
     return normalized if normalized in RATE_LIMIT_PLAN_TYPES else None
 
 

@@ -1033,6 +1033,8 @@ class _WebSocketContinuityState:
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_function_call_ids: list[str] = field(default_factory=list)
     last_pending_tool_call_types: dict[str, str] = field(default_factory=dict)
+    http_stream_active_turn_replay_zlib: bytes | None = None
+    http_stream_active_turn_replay_recorded_at: float | None = None
     responses_lite_model: str | None = None
     responses_lite_response_id: str | None = None
 

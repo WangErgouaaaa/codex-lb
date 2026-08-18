@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
@@ -808,6 +809,10 @@ _POISONED_LOCAL_COMPACT_FALLBACK_TEXT = "Local compact fallback preserved the la
 _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS = 100_000
 _COMPACT_UPSTREAM_HEAD_ESTIMATED_TOKENS = 12_000
 _ESTIMATED_CHARS_PER_TOKEN = 4
+_COMPACT_OMITTED_INLINE_IMAGE_TEXT = (
+    "[compact trim] Omitted inline image bytes that were already observed before compaction"
+)
+_COMPACT_INLINE_IMAGE_DATA_URL_RE = re.compile(r"""data:image/[^,\s]+,[^\s"'<>]+""")
 
 
 def _strip_subscription_prompt_cache_controls(payload: MutableJsonObject) -> None:
@@ -1063,6 +1068,14 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     required_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
     required_tokens = _estimated_json_tokens(required_input)
     if required_tokens > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        rewritten_input, images_elided = _compact_elide_required_tool_output_images(
+            input_value,
+            required_indices=required_indices,
+        )
+        if images_elided:
+            payload["input"] = rewritten_input
+            _trim_compact_input_for_upstream(payload)
+            return
         raise ClientPayloadError(
             "Compact input exceeds the upstream size limit and cannot be trimmed "
             "without removing required state anchors.",
@@ -1120,6 +1133,77 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
     if trimmed_input is input_value:
         return
     payload["input"] = trimmed_input
+
+
+def _compact_elide_required_tool_output_images(
+    input_value: list[JsonValue],
+    *,
+    required_indices: set[int],
+) -> tuple[list[JsonValue], bool]:
+    rewritten: list[JsonValue] = []
+    changed = False
+    for index, item in enumerate(input_value):
+        if (
+            index in required_indices
+            and is_json_mapping(item)
+            and item.get("type") in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES
+        ):
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten.append(rewritten_item)
+            changed = changed or item_changed
+        else:
+            rewritten.append(item)
+    return rewritten, changed
+
+
+def _compact_elide_inline_images(value: JsonValue) -> tuple[JsonValue, bool]:
+    """Replace already-observed inline image bytes with a compact-only marker."""
+
+    if is_json_mapping(value):
+        if value.get("type") == "input_image":
+            image_url = value.get("image_url")
+            if isinstance(image_url, str) and image_url.startswith("data:image/"):
+                return (
+                    {
+                        "type": "input_text",
+                        "text": f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(image_url)} encoded characters).",
+                    },
+                    True,
+                )
+        if value.get("type") == "image_url":
+            image_url = value.get("image_url")
+            url = image_url.get("url") if is_json_mapping(image_url) else image_url
+            if isinstance(url, str) and url.startswith("data:image/"):
+                return (
+                    {
+                        "type": "text",
+                        "text": f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(url)} encoded characters).",
+                    },
+                    True,
+                )
+        rewritten_mapping: JsonObject = {}
+        changed = False
+        for key, item in value.items():
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten_mapping[key] = rewritten_item
+            changed = changed or item_changed
+        return rewritten_mapping, changed
+    if is_json_list(value):
+        rewritten: list[JsonValue] = []
+        changed = False
+        for item in value:
+            rewritten_item, item_changed = _compact_elide_inline_images(item)
+            rewritten.append(rewritten_item)
+            changed = changed or item_changed
+        return rewritten, changed
+    if isinstance(value, str) and "data:image/" in value:
+        rewritten_value, replacements = _COMPACT_INLINE_IMAGE_DATA_URL_RE.subn(
+            lambda match: f"{_COMPACT_OMITTED_INLINE_IMAGE_TEXT} ({len(match.group(0))} encoded characters).",
+            value,
+        )
+        if replacements:
+            return rewritten_value, True
+    return value, False
 
 
 def _compact_fit_selected_indices_to_wire_budget(

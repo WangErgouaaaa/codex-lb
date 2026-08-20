@@ -20,6 +20,8 @@ def _parser() -> argparse.ArgumentParser:
     main.add_argument("--bind-host", choices=("0.0.0.0", "127.0.0.1"), default="0.0.0.0")
     main.add_argument("--bind-port", type=int, required=True)
     main.add_argument("--outbound-proxy", default="http://127.0.0.1:8800")
+    main.add_argument("--proxy-unauthenticated-client-cidrs", default="")
+    main.add_argument("--log-proxy-request-shape", action="store_true")
     main.add_argument("--dry-run", action="store_true")
 
     shim = subparsers.add_parser("shim")
@@ -64,6 +66,8 @@ def _main_configuration(args: argparse.Namespace) -> dict[str, object]:
         "database_url": f"sqlite+aiosqlite:///{database_path.as_posix()}",
         "encryption_key_file": encryption_key.as_posix(),
         "outbound_proxy": args.outbound_proxy,
+        "proxy_unauthenticated_client_cidrs": args.proxy_unauthenticated_client_cidrs,
+        "log_proxy_request_shape": args.log_proxy_request_shape,
     }
 
 
@@ -106,14 +110,27 @@ def _run_main(args: argparse.Namespace) -> None:
             "CODEX_LB_SERVICE_TASK": "1",
             "CODEX_LB_DATABASE_URL": str(configuration["database_url"]),
             "CODEX_LB_ENCRYPTION_KEY_FILE": str(configuration["encryption_key_file"]),
-            "CODEX_LB_TRACE": "",
+            "CODEX_LB_TRACE": "shape" if configuration["log_proxy_request_shape"] else "",
             "CODEX_LB_STRICT_SERVICE_TIER_ACCOUNT_FILTER": "false",
             "CODEX_LB_STREAM_IDLE_TIMEOUT_SECONDS": "300",
         }
     )
+    proxy_unauthenticated_client_cidrs = str(configuration["proxy_unauthenticated_client_cidrs"])
+    if proxy_unauthenticated_client_cidrs:
+        os.environ["CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS"] = proxy_unauthenticated_client_cidrs
+    else:
+        os.environ.pop("CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS", None)
     outbound_proxy = str(configuration["outbound_proxy"])
     if outbound_proxy:
-        for name in ("all_proxy", "socks_proxy", "https_proxy", "http_proxy"):
+        proxy_names = ("all_proxy", "socks_proxy", "https_proxy", "http_proxy")
+        for name in proxy_names:
+            os.environ.pop(name, None)
+        selected_proxy_names = (
+            ("all_proxy", "socks_proxy")
+            if outbound_proxy.lower().startswith("socks")
+            else ("all_proxy", "https_proxy", "http_proxy")
+        )
+        for name in selected_proxy_names:
             os.environ[name] = outbound_proxy
 
     streams = _redirect_output(data_root / "logs", f"codex-lb-{args.bind_port}")

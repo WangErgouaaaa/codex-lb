@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import socket
@@ -7,6 +8,8 @@ import subprocess
 import sys
 import threading
 import time
+import types
+from argparse import Namespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,15 @@ pytestmark = [
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OPS_ROOT = REPO_ROOT / "ops" / "windows"
 POWERSHELL = "powershell.exe"
+
+
+def _load_supervised_launcher():
+    launcher_path = OPS_ROOT / "codex_lb_supervised_launcher.py"
+    spec = importlib.util.spec_from_file_location("codex_lb_supervised_launcher_test", launcher_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _run_powershell(
@@ -202,6 +214,44 @@ def test_supervision_installer_quotes_paths_with_spaces(tmp_path: Path) -> None:
     assert plan["encryption_key_file"] == str(encryption_key.resolve())
 
 
+def test_supervision_installer_propagates_runtime_options(tmp_path: Path) -> None:
+    installer = OPS_ROOT / "install-codex-lb-supervision.ps1"
+    result = _run_powershell(
+        installer,
+        "-RepoRoot",
+        str(REPO_ROOT),
+        "-WorkspaceRoot",
+        str(REPO_ROOT.parent),
+        "-DataRoot",
+        str(tmp_path / "data root"),
+        "-CodexHome",
+        str(tmp_path / "codex home"),
+        "-EncryptionKeyFile",
+        str(tmp_path / "encryption.key"),
+        "-MainPort",
+        "2456",
+        "-ShimPort",
+        "15957",
+        "-OutboundProxy",
+        "http://127.0.0.1:9999",
+        "-Codex56ProxyMaxBodyBytes",
+        "67108864",
+        "-ProxyUnauthenticatedClientCidrs",
+        "192.0.2.0/24",
+        "-LogProxyRequestShape",
+        "-DryRun",
+    )
+
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    main_task = next(task for task in plan["tasks"] if task["name"].endswith("-main"))
+    shim_task = next(task for task in plan["tasks"] if task["name"].endswith("-shim"))
+    assert "--outbound-proxy http://127.0.0.1:9999" in main_task["arguments"]
+    assert "--proxy-unauthenticated-client-cidrs 192.0.2.0/24" in main_task["arguments"]
+    assert "--log-proxy-request-shape" in main_task["arguments"]
+    assert "--max-body-bytes 67108864" in shim_task["arguments"]
+
+
 def test_watchdog_launcher_creates_no_console_window(tmp_path: Path) -> None:
     launcher = OPS_ROOT / "codex_lb_no_window_powershell.py"
     probe_script = tmp_path / "console probe.ps1"
@@ -315,6 +365,48 @@ def test_supervised_restart_dry_run_describes_isolated_cutover(tmp_path: Path) -
     assert plan["shim_port"] == 15957
 
 
+def test_supervised_restart_dry_run_preserves_runtime_options(tmp_path: Path) -> None:
+    restart = OPS_ROOT / "restart-codex-lb-supervision.ps1"
+    result = _run_powershell(
+        restart,
+        "-RepoRoot",
+        str(REPO_ROOT),
+        "-WorkspaceRoot",
+        str(REPO_ROOT.parent),
+        "-DataRoot",
+        str(tmp_path / "data root"),
+        "-CodexHome",
+        str(tmp_path / "codex home"),
+        "-EncryptionKeyFile",
+        str(tmp_path / "encryption.key"),
+        "-MainPort",
+        "2456",
+        "-ShimPort",
+        "15957",
+        "-OutboundProxy",
+        "http://127.0.0.1:9999",
+        "-Codex56ProxyMaxBodyBytes",
+        "67108864",
+        "-ProxyUnauthenticatedClientCidrs",
+        "192.0.2.0/24",
+        "-LogProxyRequestShape",
+        "-StartupTimeoutSeconds",
+        "47",
+        "-StartupPollIntervalMilliseconds",
+        "333",
+        "-DryRun",
+    )
+
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan["outbound_proxy"] == "http://127.0.0.1:9999"
+    assert plan["codex56_proxy_max_body_bytes"] == 67108864
+    assert plan["proxy_unauthenticated_client_cidrs"] == "192.0.2.0/24"
+    assert plan["log_proxy_request_shape"] is True
+    assert plan["startup_timeout_seconds"] == 47
+    assert plan["startup_poll_interval_milliseconds"] == 333
+
+
 def test_main_launcher_uses_explicit_encryption_key_file(tmp_path: Path) -> None:
     launcher = OPS_ROOT / "codex_lb_supervised_launcher.py"
     encryption_key = tmp_path / "canonical encryption.key"
@@ -345,6 +437,57 @@ def test_main_launcher_uses_explicit_encryption_key_file(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
     configuration = json.loads(result.stdout)
     assert Path(configuration["encryption_key_file"]).resolve() == encryption_key.resolve()
+
+
+def test_main_launcher_maps_runtime_options_to_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    launcher = _load_supervised_launcher()
+    repo_root = tmp_path / "repo"
+    data_root = tmp_path / "data"
+    encryption_key = tmp_path / "encryption.key"
+    repo_root.mkdir()
+    data_root.mkdir()
+    encryption_key.write_text("test", encoding="utf-8")
+    captured: dict[str, object] = {}
+    fake_cli = types.ModuleType("app.cli")
+
+    def fake_main(arguments: list[str]) -> None:
+        captured["arguments"] = arguments
+        captured["trace"] = os.environ.get("CODEX_LB_TRACE")
+        captured["cidrs"] = os.environ.get("CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS")
+        captured["proxy_env"] = {
+            name: os.environ.get(name)
+            for name in ("all_proxy", "socks_proxy", "https_proxy", "http_proxy")
+        }
+
+    setattr(fake_cli, "main", fake_main)
+    monkeypatch.setitem(sys.modules, "app.cli", fake_cli)
+    monkeypatch.setattr(launcher, "_redirect_output", lambda *_args: ())
+
+    launcher._run_main(
+        Namespace(
+            repo_root=repo_root,
+            data_root=data_root,
+            encryption_key_file=encryption_key,
+            bind_host="127.0.0.1",
+            bind_port=2456,
+            outbound_proxy="http://127.0.0.1:9999",
+            proxy_unauthenticated_client_cidrs="192.0.2.0/24",
+            log_proxy_request_shape=True,
+            dry_run=False,
+        )
+    )
+
+    assert captured == {
+        "arguments": ["--host", "127.0.0.1", "--port", "2456"],
+        "trace": "shape",
+        "cidrs": "192.0.2.0/24",
+        "proxy_env": {
+            "all_proxy": "http://127.0.0.1:9999",
+            "socks_proxy": None,
+            "https_proxy": "http://127.0.0.1:9999",
+            "http_proxy": "http://127.0.0.1:9999",
+        },
+    }
 
 
 def test_shim_launcher_uses_explicit_codex_home_for_tools_cache(tmp_path: Path) -> None:
@@ -379,6 +522,40 @@ def test_shim_launcher_uses_explicit_codex_home_for_tools_cache(tmp_path: Path) 
     assert result.returncode == 0, result.stderr
     configuration = json.loads(result.stdout)
     assert configuration["tools_cache"] == str(codex_home.resolve() / "cache" / "codex-56-tools.json")
+
+
+def test_shim_launcher_accepts_custom_max_body_bytes(tmp_path: Path) -> None:
+    launcher = OPS_ROOT / "codex_lb_supervised_launcher.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(launcher),
+            "shim",
+            "--repo-root",
+            str(REPO_ROOT),
+            "--workspace-root",
+            str(REPO_ROOT.parent),
+            "--data-root",
+            str(tmp_path / "data root"),
+            "--codex-home",
+            str(tmp_path / "codex home"),
+            "--listen-port",
+            "15957",
+            "--upstream-port",
+            "2456",
+            "--max-body-bytes",
+            "67108864",
+            "--dry-run",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["max_body_bytes"] == 67108864
 
 
 def test_main_launcher_preserves_canonical_proxy_environment_names() -> None:
@@ -533,7 +710,7 @@ def test_recovery_requires_service_kind_and_exact_identity_contract() -> None:
     recovery = (OPS_ROOT / "codex-lb-recover-task.ps1").read_text(encoding="utf-8")
     watchdog = (OPS_ROOT / "codex-lb-request-watchdog.ps1").read_text(encoding="utf-8")
 
-    assert "[ValidateSet(\"main\", \"shim\")]" in recovery
+    assert '[ValidateSet("main", "shim")]' in recovery
     assert "Test-CodexLbSupervisedTaskAction" in recovery
     assert "Test-CodexLbSupervisedListenerProcess" in recovery
     assert '"-ServiceKind", $ServiceKind' in watchdog

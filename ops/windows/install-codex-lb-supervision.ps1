@@ -16,6 +16,11 @@ param(
     [int]$ShimPort,
     [ValidateSet("0.0.0.0", "127.0.0.1")]
     [string]$BindHost = "0.0.0.0",
+    [string]$OutboundProxy = "http://127.0.0.1:8800",
+    [ValidateRange(1, 134217728)]
+    [int]$Codex56ProxyMaxBodyBytes = 128 * 1024 * 1024,
+    [string]$ProxyUnauthenticatedClientCidrs = "",
+    [switch]$LogProxyRequestShape,
     [string]$TaskNamePrefix = "codex-lb",
     [switch]$DryRun
 )
@@ -29,14 +34,14 @@ $resolvedEncryptionKeyFile = [System.IO.Path]::GetFullPath($EncryptionKeyFile)
 $opsRoot = $PSScriptRoot
 
 function Quote-Argument {
-    param([Parameter(Mandatory = $true)][string]$Value)
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
     return '"' + ($Value -replace '"', '\"') + '"'
 }
 
 function Join-ActionArguments {
     param([string[]]$Values)
     return ($Values | ForEach-Object {
-        if ($_ -match "[\s`"]") { Quote-Argument -Value $_ } else { $_ }
+        if ($_ -eq "" -or $_ -match "[\s`"]") { Quote-Argument -Value $_ } else { $_ }
     }) -join " "
 }
 
@@ -54,14 +59,20 @@ $safeTaskNamePrefix = $TaskNamePrefix -replace "[^A-Za-z0-9_.-]", "_"
 $stateNamespace = "$safeTaskNamePrefix-$MainPort-$ShimPort"
 $stateRoot = Join-Path (Join-Path $resolvedDataRoot "watchdog") $stateNamespace
 
-$mainArguments = Join-ActionArguments @(
+$mainArgumentValues = @(
     $supervisedLauncher, "main",
     "--repo-root", $resolvedRepoRoot,
     "--data-root", $resolvedDataRoot,
     "--encryption-key-file", $resolvedEncryptionKeyFile,
     "--bind-host", $BindHost,
-    "--bind-port", [string]$MainPort
+    "--bind-port", [string]$MainPort,
+    "--outbound-proxy", $OutboundProxy,
+    "--proxy-unauthenticated-client-cidrs", $ProxyUnauthenticatedClientCidrs
 )
+if ($LogProxyRequestShape) {
+    $mainArgumentValues += "--log-proxy-request-shape"
+}
+$mainArguments = Join-ActionArguments $mainArgumentValues
 $shimArguments = Join-ActionArguments @(
     $supervisedLauncher, "shim",
     "--repo-root", $resolvedRepoRoot,
@@ -69,7 +80,8 @@ $shimArguments = Join-ActionArguments @(
     "--data-root", $resolvedDataRoot,
     "--codex-home", $resolvedCodexHome,
     "--listen-port", [string]$ShimPort,
-    "--upstream-port", [string]$MainPort
+    "--upstream-port", [string]$MainPort,
+    "--max-body-bytes", [string]$Codex56ProxyMaxBodyBytes
 )
 $mainWatchdogArguments = Join-ActionArguments @(
     $watchdogLauncher, $watchdogScript,
@@ -120,6 +132,10 @@ $plan = [pscustomobject]@{
     codex_home = $resolvedCodexHome
     encryption_key_file = $resolvedEncryptionKeyFile
     bind_host = $BindHost
+    outbound_proxy = $OutboundProxy
+    codex56_proxy_max_body_bytes = $Codex56ProxyMaxBodyBytes
+    proxy_unauthenticated_client_cidrs = $ProxyUnauthenticatedClientCidrs
+    log_proxy_request_shape = [bool]$LogProxyRequestShape
     main_port = $MainPort
     shim_port = $ShimPort
     tasks = $tasks

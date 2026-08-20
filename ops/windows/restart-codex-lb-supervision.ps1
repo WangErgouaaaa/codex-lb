@@ -16,12 +16,19 @@ param(
     [int]$ShimPort,
     [ValidateSet("0.0.0.0", "127.0.0.1")]
     [string]$BindHost = "0.0.0.0",
+    [string]$OutboundProxy = "http://127.0.0.1:8800",
+    [ValidateRange(1, 134217728)]
+    [int]$Codex56ProxyMaxBodyBytes = 128 * 1024 * 1024,
+    [string]$ProxyUnauthenticatedClientCidrs = "",
+    [switch]$LogProxyRequestShape,
     [string]$TaskNamePrefix = "codex-lb",
     [string[]]$LegacyTaskNames = @(),
     [ValidateRange(10, 300)]
     [int]$StartupTimeoutSeconds = 180,
     [ValidateRange(1, 30)]
     [int]$ProbeTimeoutSeconds = 5,
+    [ValidateRange(50, 5000)]
+    [int]$StartupPollIntervalMilliseconds = 500,
     [string]$ExpectedStatusCodes = "200,401,403",
     [switch]$DryRun
 )
@@ -59,6 +66,10 @@ $plan = [pscustomobject]@{
     codex_home = $resolvedCodexHome
     encryption_key_file = $resolvedEncryptionKeyFile
     bind_host = $BindHost
+    outbound_proxy = $OutboundProxy
+    codex56_proxy_max_body_bytes = $Codex56ProxyMaxBodyBytes
+    proxy_unauthenticated_client_cidrs = $ProxyUnauthenticatedClientCidrs
+    log_proxy_request_shape = [bool]$LogProxyRequestShape
     main_port = $MainPort
     shim_port = $ShimPort
     main_task = $mainTaskName
@@ -68,6 +79,8 @@ $plan = [pscustomobject]@{
     main_probe = $mainProbe
     shim_probe = $shimProbe
     legacy_tasks = $LegacyTaskNames
+    startup_timeout_seconds = $StartupTimeoutSeconds
+    startup_poll_interval_milliseconds = $StartupPollIntervalMilliseconds
 }
 if ($DryRun) {
     $plan | ConvertTo-Json -Depth 4
@@ -173,7 +186,7 @@ function Wait-RequestPath {
         if ($null -eq $task) {
             throw "Scheduled task '$TaskName' disappeared during startup."
         }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds $StartupPollIntervalMilliseconds
     }
     throw "Task '$TaskName' did not pass request probe '$Uri' within $StartupTimeoutSeconds seconds."
 }
@@ -251,6 +264,10 @@ $existingLegacyTaskNames = @(
     -MainPort $MainPort `
     -ShimPort $ShimPort `
     -BindHost $BindHost `
+    -OutboundProxy $OutboundProxy `
+    -Codex56ProxyMaxBodyBytes $Codex56ProxyMaxBodyBytes `
+    -ProxyUnauthenticatedClientCidrs $ProxyUnauthenticatedClientCidrs `
+    -LogProxyRequestShape:$LogProxyRequestShape `
     -TaskNamePrefix $TaskNamePrefix
 
 try {

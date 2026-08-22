@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import socket
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -352,6 +353,59 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     assert client.calls[0]["route"] is route
     assert client.calls[0]["json"]["model"] == "gpt-5.2"
     assert trace.endpoint_id == "ep_1"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_retrims_input_after_image_inlining(
+    route: ResolvedUpstreamRoute,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = proxy_module.get_settings().model_copy(update={"image_inline_fetch_enabled": True})
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: settings)
+
+    async def inline_images(payload, session, connect_timeout):
+        del session, connect_timeout
+        inlined = dict(payload)
+        input_items = list(cast(list[dict[str, object]], payload["input"]))
+        image_item = dict(input_items[1])
+        image_item["content"] = [
+            {
+                "type": "input_image",
+                "image_url": "data:image/png;base64," + "A" * 500_000,
+            }
+        ]
+        input_items[1] = image_item
+        inlined["input"] = input_items
+        return inlined
+
+    monkeypatch.setattr(proxy_module, "_inline_input_image_urls", inline_images)
+    client = _CodexClient(_CompactResponse())
+    payload = ResponsesCompactRequest(
+        model="gpt-5.6-sol",
+        instructions="Summarize.",
+        input=[
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": [{"type": "input_image", "image_url": "https://example.test/screenshot.png"}],
+            },
+        ],
+    )
+
+    response = await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    assert response.object == "response.compact"
+    wire_input = client.calls[0]["json"]["input"]
+    assert "data:image/png;base64" not in json.dumps(wire_input)
+    assert wire_input[-1] == {"type": "compaction_trigger"}
 
 
 @pytest.mark.asyncio

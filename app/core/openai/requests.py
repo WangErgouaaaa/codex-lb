@@ -1255,9 +1255,10 @@ def _compact_fit_selected_indices_to_wire_budget(
     return selected
 
 
-def validate_compact_input_wire_budget(payload: Mapping[str, JsonValue]) -> None:
-    """Reject compact input that exceeds the upstream budget after transformations."""
+def validate_compact_input_wire_budget(payload: MutableJsonObject) -> None:
+    """Retrim transformed compact input, then reject it if it still cannot fit."""
 
+    _trim_compact_input_for_upstream(payload)
     input_value = payload.get("input")
     if not is_json_list(input_value):
         return

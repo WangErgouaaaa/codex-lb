@@ -106,24 +106,17 @@ def _retained_http_stream_fresh_replay(
     return fresh_payload
 
 
-def _record_http_stream_continuity_output_item(
-    output_items: list[JsonValue],
-    event_payload: dict[str, JsonValue] | None,
-) -> None:
-    if not isinstance(event_payload, dict) or event_payload.get("type") != "response.output_item.done":
-        return
-    item = event_payload.get("item")
-    if isinstance(item, dict):
-        output_items.append(cast(JsonValue, item))
-
-
-def _record_http_stream_continuity_completion(
+def _record_http_continuity(
     continuity_state: _WebSocketContinuityState | None,
     payload: ResponsesRequest,
     event: OpenAIEvent | None,
-    *,
+    event_payload: dict[str, JsonValue] | None,
     output_items: list[JsonValue],
 ) -> None:
+    if isinstance(event_payload, dict) and event_payload.get("type") == "response.output_item.done":
+        item = event_payload.get("item")
+        if isinstance(item, dict):
+            output_items.append(cast(JsonValue, item))
     if continuity_state is None or event is None or event.type != "response.completed":
         return
     response_id = event.response.id if event.response else None

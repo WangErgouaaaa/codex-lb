@@ -455,8 +455,7 @@ def test_main_launcher_maps_runtime_options_to_environment(tmp_path: Path, monke
         captured["trace"] = os.environ.get("CODEX_LB_TRACE")
         captured["cidrs"] = os.environ.get("CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS")
         captured["proxy_env"] = {
-            name: os.environ.get(name)
-            for name in ("all_proxy", "socks_proxy", "https_proxy", "http_proxy")
+            name: os.environ.get(name) for name in ("all_proxy", "socks_proxy", "https_proxy", "http_proxy")
         }
 
     setattr(fake_cli, "main", fake_main)

@@ -42,9 +42,7 @@ from app.core.errors import (
     response_failed_event,
 )
 from app.core.openai.parsing import parse_sse_event_payload
-from app.core.openai.requests import (
-    ResponsesRequest,
-)
+from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
@@ -268,10 +266,7 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
-from app.modules.proxy._service.streaming.continuity import (
-    _record_http_stream_continuity_completion,
-    _record_http_stream_continuity_output_item,
-)
+from app.modules.proxy._service.streaming.continuity import _record_http_continuity
 from app.modules.proxy._service.streaming.helpers import (
     _handle_stream_error as _handle_stream_error_helper,
 )
@@ -770,13 +765,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                     settlement.downstream_visible = True
                     if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                         settlement.downstream_text_visible = True
-                    _record_http_stream_continuity_output_item(continuity_output_items, first_payload)
-                    _record_http_stream_continuity_completion(
-                        continuity_state,
-                        payload,
-                        event,
-                        output_items=continuity_output_items,
-                    )
+                    _record_http_continuity(continuity_state, payload, event, first_payload, continuity_output_items)
                     yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
@@ -957,13 +946,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.downstream_visible = True
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     settlement.downstream_text_visible = True
-                _record_http_stream_continuity_output_item(continuity_output_items, event_payload)
-                _record_http_stream_continuity_completion(
-                    continuity_state,
-                    payload,
-                    event,
-                    output_items=continuity_output_items,
-                )
+                _record_http_continuity(continuity_state, payload, event, event_payload, continuity_output_items)
                 yield line
             if not terminal_event_seen:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)

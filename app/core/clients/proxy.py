@@ -653,7 +653,6 @@ _SDK_FINGERPRINT_HEADER_KEYS: frozenset[str] = frozenset(
 # downgrade this change is meant to avoid.
 _SDK_FINGERPRINT_HEADER_PREFIXES: tuple[str, ...] = ("x-stainless-",)
 _CODEX_CLI_ORIGINATOR = "codex_cli_rs"
-_CHATGPT_ACCOUNT_ID_HEADER = "ChatGPT-Account-Id"
 # Fixed Codex client fingerprint (issue #1340 / PRINCIPLES.md P2). These
 # values impersonate a plausible first-party Codex CLI install and are
 # maintained in lockstep with ``model_registry_client_version`` bumps; they
@@ -706,10 +705,15 @@ def _is_native_codex_request(headers: Mapping[str, str]) -> bool:
 
 
 def _normalize_non_native_upstream_fingerprint(headers: dict[str, str]) -> None:
-    """Rewrite a non-native request's outbound fingerprint to the Codex CLI
-    persona in place: set ``User-Agent`` to a ``codex_cli_rs`` string, strip
-    SDK-only ``x-openai-client-*`` and ``x-stainless-*`` headers, and replace
-    any inbound ``originator`` or ``version`` with the canonical Codex values."""
+    """Rewrite the outbound fingerprint to the single Codex CLI persona in
+    place: set ``User-Agent`` to a ``codex_cli_rs`` string, strip SDK-only
+    ``x-openai-client-*`` and ``x-stainless-*`` headers, and replace any
+    inbound ``originator`` or ``version`` with the canonical Codex values.
+
+    Applied to every upstream request, native Codex clients included (fork
+    behavior: one shared persona leaves all egresses so upstream never sees
+    per-device fingerprints on a shared account pool).
+    """
     version = get_codex_version_cache().cached_version_or_default()
     codex_user_agent = build_codex_user_agent(version)
     for key in list(headers.keys()):
@@ -734,26 +738,46 @@ def _build_upstream_headers(
     accept: str = "text/event-stream",
 ) -> dict[str, str]:
     headers = filter_inbound_headers(inbound)
-    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
-    if not native:
-        _normalize_non_native_upstream_fingerprint(headers)
+    # Unconditional persona rewrite (fork behavior, unify-upstream-fingerprint):
+    # native Codex clients are normalized too, so every request leaves this
+    # egress with the same shared codex_cli_rs fingerprint.
+    _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     headers["Accept"] = accept
     headers["Content-Type"] = "application/json"
     if account_id:
-        if native:
-            headers["chatgpt-account-id"] = account_id
-        else:
-            headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
+        headers["chatgpt-account-id"] = account_id
     return headers
 
 
 _TRANSCRIBE_FORWARD_HEADER_PREFIXES = ("x-openai-", "x-codex-")
+
+# Fingerprint headers stripped from the minimal-forward egress paths
+# (``/transcribe`` and ``/files``) on top of ``_SDK_FINGERPRINT_HEADER_KEYS``.
+# These paths do not run ``filter_inbound_headers``, so the ``x-openai-``
+# prefix rule would otherwise forward the internal responses-lite marker, and
+# the real client build leaks through ``x-codex-version``.
+_MINIMAL_EGRESS_EXTRA_EXCLUDED_HEADERS: frozenset[str] = frozenset(
+    {
+        "x-openai-internal-codex-responses-lite",
+        "x-codex-version",
+    }
+)
+
+
+def _strip_minimal_egress_fingerprint_headers(headers: dict[str, str]) -> None:
+    """Remove client-fingerprint headers from a minimal-forward egress header
+    set in place: the ``x-openai-client-*`` SDK family plus the internal
+    responses-lite marker and ``x-codex-version``."""
+    for key in list(headers.keys()):
+        lowered = key.lower()
+        if lowered in _SDK_FINGERPRINT_HEADER_KEYS or lowered in _MINIMAL_EGRESS_EXTRA_EXCLUDED_HEADERS:
+            del headers[key]
 
 
 def _build_upstream_transcribe_headers(
@@ -763,17 +787,24 @@ def _build_upstream_transcribe_headers(
 ) -> dict[str, str]:
     # Minimal header set matching Codex CLI ``/transcribe`` fingerprint.
     # Omit Accept, x-request-id, and bulk-forwarded inbound headers to
-    # avoid upstream WAF rejection.
+    # avoid upstream WAF rejection. The User-Agent is rewritten to the single
+    # shared codex_cli_rs persona (fork behavior: same persona as the main
+    # egress) and SDK fingerprint headers are stripped -- this path does not
+    # go through ``filter_inbound_headers``, so the ``x-openai-`` prefix rule
+    # would otherwise leak the real client fingerprint upstream.
     headers: dict[str, str] = {}
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
         headers["chatgpt-account-id"] = account_id
+    headers["User-Agent"] = build_codex_user_agent(get_codex_version_cache().cached_version_or_default())
     for key, value in inbound.items():
         lower = key.lower()
         if lower == "user-agent":
+            # Replaced by the shared persona above; never forward the inbound UA.
+            continue
+        if lower.startswith(_TRANSCRIBE_FORWARD_HEADER_PREFIXES):
             headers[key] = value
-        elif lower.startswith(_TRANSCRIBE_FORWARD_HEADER_PREFIXES):
-            headers[key] = value
+    _strip_minimal_egress_fingerprint_headers(headers)
     return headers
 
 
@@ -792,26 +823,21 @@ def _build_upstream_websocket_headers(
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
     filtered = filter_inbound_headers(inbound)
     headers = {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
-    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
-    # Normalize a non-native client's fingerprint regardless of transport. The
-    # ``auto`` transport routes a turn-state continuity follow-up onto the
-    # websocket path even for an HTTP SDK client, so this builder must apply the
-    # same codex_cli_rs persona rewrite as ``_build_upstream_headers``; otherwise
-    # the SDK fingerprint reaches upstream unchanged and the priority-downgrade
-    # mitigation is bypassed for exactly the continuity-token scenario.
-    if not native:
-        _normalize_non_native_upstream_fingerprint(headers)
+    # Normalize every client's fingerprint regardless of transport (fork
+    # behavior: one shared persona on all egresses). The ``auto`` transport
+    # routes a turn-state continuity follow-up onto the websocket path even
+    # for an HTTP SDK client, so this builder must apply the same
+    # codex_cli_rs persona rewrite as ``_build_upstream_headers``; otherwise
+    # the SDK fingerprint reaches upstream unchanged.
+    _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
-        if native:
-            headers["chatgpt-account-id"] = account_id
-        else:
-            headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
+        headers["chatgpt-account-id"] = account_id
     return headers
 
 

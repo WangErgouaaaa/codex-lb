@@ -370,8 +370,12 @@ class Settings(BaseSettings):
     # Fallback Codex client version used when the live release lookup fails.
     # Must stay >= the highest ``minimal_client_version`` in the bootstrap
     # catalog (GPT-5.6 requires 0.144.0) or a degraded-startup refresh would
-    # receive an upstream catalog without those models.
-    model_registry_client_version: str = "0.144.0"
+    # receive an upstream catalog without those models. Pinned to the current
+    # upstream release rather than that bootstrap floor: newer models gate on
+    # versions above 0.144.0 (gpt-6-astra rejects 0.144.0 with "requires a
+    # newer version of Codex"), and every normalized outbound request reports
+    # this value when the version cache is cold.
+    model_registry_client_version: str = "0.155.1"
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)

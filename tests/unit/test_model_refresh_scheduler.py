@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import logging
@@ -582,3 +583,38 @@ async def test_refresh_once_clears_registry_when_no_active_accounts(
 
     clear.assert_awaited_once_with()
     invalidate.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_run_loop_warms_codex_version_cache_without_leadership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A follower never enters the leader-gated model fetch, and a leader with
+    # no ACTIVE accounts returns before fetching models; the version-cache
+    # warm at the top of _run_loop() is what keeps the cache fresh in both
+    # scenarios so normalized outbound requests never pin the stale static
+    # fallback version.
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=3600, enabled=True)
+
+    get_version = AsyncMock(return_value="1.2.3")
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_codex_version_cache",
+        lambda: SimpleNamespace(get_version=get_version),
+    )
+
+    class _FollowerElection:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            # Follower: the leader body never runs. End the loop after the
+            # first cycle so the test stays bounded.
+            scheduler._stop.set()
+            return None
+
+    reconcile = AsyncMock()
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _FollowerElection())
+    monkeypatch.setattr(scheduler_module, "reconcile_model_registry_from_store", reconcile)
+
+    await asyncio.wait_for(scheduler._run_loop(), timeout=5.0)
+
+    get_version.assert_awaited_once()
+    reconcile.assert_awaited_once()

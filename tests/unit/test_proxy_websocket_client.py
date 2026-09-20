@@ -248,7 +248,11 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert seen["url"] == "wss://chatgpt.com/backend-api/codex/responses"
     kwargs = cast(dict[str, object], seen["kwargs"])
     assert kwargs["origin"] == "https://chatgpt.com"
-    assert kwargs["user_agent_header"] == "Codex CLI Test"
+    # Fork behavior (unify-upstream-fingerprint): every egress is normalized to
+    # the shared codex_cli_rs persona, so the inbound "Codex CLI Test" UA is
+    # rewritten before the websocket handshake. Version comes from the settings
+    # default in tests; assert the stable prefix instead of pinning it.
+    assert kwargs["user_agent_header"].startswith("codex_cli_rs/")
     assert kwargs["proxy"] is None
     assert kwargs["open_timeout"] == 7.0
     assert "ping_interval" not in kwargs
@@ -1146,8 +1150,9 @@ def test_responses_websocket_builder_normalizes_non_native_sdk_fingerprint():
     assert headers["originator"] == "codex_cli_rs"
     assert headers["version"] == "0.142.0"
     assert "Version" not in headers
-    assert headers["ChatGPT-Account-Id"] == "acct-1"
-    assert "chatgpt-account-id" not in headers
+    # Every egress emits the account id under the same lowercase header.
+    assert headers["chatgpt-account-id"] == "acct-1"
+    assert "ChatGPT-Account-Id" not in headers
     # The responses websocket beta header is still appended.
     assert "responses_websockets=2026-02-06" in headers["openai-beta"]
 
@@ -1167,13 +1172,21 @@ def test_responses_websocket_builder_strips_internal_responses_lite_header():
     assert "responses_websockets=2026-02-06" in headers["openai-beta"]
 
 
-def test_responses_websocket_builder_leaves_native_codex_unchanged():
+def test_responses_websocket_builder_normalizes_native_codex_to_shared_persona():
+    # Fork behavior: a native codex_cli_rs websocket caller is normalized to
+    # the shared persona (canonical fixed OS/arch/terminal) and the lowercase
+    # account header like every other client.
+    from unittest.mock import patch
+
+    from app.core.clients import proxy as proxy_module
     from app.core.clients.proxy_websocket import _build_upstream_websocket_headers
 
     native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
     inbound = {"User-Agent": native_ua, "openai-beta": "responses_websockets=2026-02-06"}
-    headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
 
-    assert headers["User-Agent"] == native_ua
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
+    assert "responses_websockets=2026-02-06" in headers["openai-beta"]

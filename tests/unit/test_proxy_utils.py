@@ -16,7 +16,7 @@ from copy import deepcopy
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Iterator, Literal, Protocol, Self, cast
-from unittest.mock import ANY, AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from unittest.mock import call as mock_call
 
 import aiohttp
@@ -1456,26 +1456,27 @@ async def test_model_source_persists_conversation_id_without_changing_useragent_
 
 def test_build_upstream_headers_overrides_auth():
     # No native Codex User-Agent on the inbound request -> the upstream
-    # fingerprint is normalized to the Codex CLI persona and the account header
-    # is emitted in PascalCase (ChatGPT-Account-Id).
+    # fingerprint is normalized to the Codex CLI persona and every egress
+    # emits the account header lowercase (chatgpt-account-id).
     inbound = {"X-Request-Id": "req_1"}
     headers = _build_upstream_headers(inbound, "token", "acc_2")
     assert headers["Authorization"] == "Bearer token"
-    assert headers["ChatGPT-Account-Id"] == "acc_2"
-    assert "chatgpt-account-id" not in headers
+    assert headers["chatgpt-account-id"] == "acc_2"
+    assert "ChatGPT-Account-Id" not in headers
     assert headers["User-Agent"].startswith("codex_cli_rs/")
     assert headers["Accept"] == "text/event-stream"
     assert headers["Content-Type"] == "application/json"
 
 
-def test_build_upstream_headers_preserves_native_account_header_casing():
-    # A native Codex client request keeps the existing lowercase account header
-    # and its original User-Agent.
+def test_build_upstream_headers_normalizes_native_user_agent_to_shared_persona():
+    # Fork behavior: a native Codex client request is normalized to the shared
+    # codex_cli_rs persona like any other client.
     native_ua = "codex_exec/0.142.1 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.142.1)"
-    headers = _build_upstream_headers({"User-Agent": native_ua}, "token", "acc_2")
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers({"User-Agent": native_ua}, "token", "acc_2")
     assert headers["chatgpt-account-id"] == "acc_2"
     assert "ChatGPT-Account-Id" not in headers
-    assert headers["User-Agent"] == native_ua
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
 
 
 def test_build_upstream_headers_strips_internal_responses_lite_header():
@@ -2212,37 +2213,40 @@ async def test_resolve_websocket_previous_response_owner_fail_closed_records_met
 
 
 def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_insensitively():
-    headers = proxy_module._build_upstream_websocket_headers(
-        {
-            "accept": "text/event-stream",
-            "content-type": "application/json",
-            "User-Agent": "codex_cli_rs/0.1.0",
-        },
-        "token",
-        "acc_2",
-    )
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = proxy_module._build_upstream_websocket_headers(
+            {
+                "accept": "text/event-stream",
+                "content-type": "application/json",
+                "User-Agent": "codex_cli_rs/0.1.0",
+            },
+            "token",
+            "acc_2",
+        )
 
     assert all(key.lower() != "accept" for key in headers)
     assert all(key.lower() != "content-type" for key in headers)
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
-    assert headers["User-Agent"] == "codex_cli_rs/0.1.0"
+    # Fork behavior: the native UA is rewritten to the shared persona version.
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
 
 
 def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connection_tokens():
-    headers = proxy_module._build_upstream_websocket_headers(
-        {
-            "Connection": "keep-alive, Upgrade, X-Handshake-Debug",
-            "Keep-Alive": "timeout=5",
-            "Upgrade": "websocket",
-            "Transfer-Encoding": "chunked",
-            "Proxy-Connection": "keep-alive",
-            "X-Handshake-Debug": "1",
-            "User-Agent": "codex_cli_rs/0.1.0",
-        },
-        "token",
-        "acc_2",
-    )
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = proxy_module._build_upstream_websocket_headers(
+            {
+                "Connection": "keep-alive, Upgrade, X-Handshake-Debug",
+                "Keep-Alive": "timeout=5",
+                "Upgrade": "websocket",
+                "Transfer-Encoding": "chunked",
+                "Proxy-Connection": "keep-alive",
+                "X-Handshake-Debug": "1",
+                "User-Agent": "codex_cli_rs/0.1.0",
+            },
+            "token",
+            "acc_2",
+        )
 
     assert "Connection" not in headers
     assert "Keep-Alive" not in headers
@@ -2252,7 +2256,8 @@ def test_build_upstream_websocket_headers_strip_hop_by_hop_headers_and_connectio
     assert "X-Handshake-Debug" not in headers
     assert headers["Authorization"] == "Bearer token"
     assert headers["chatgpt-account-id"] == "acc_2"
-    assert headers["User-Agent"] == "codex_cli_rs/0.1.0"
+    # Fork behavior: the native UA is rewritten to the shared persona version.
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
 
 
 def test_build_upstream_websocket_headers_strips_internal_responses_lite_header():

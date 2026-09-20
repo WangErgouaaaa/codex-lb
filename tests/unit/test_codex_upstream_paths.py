@@ -5,7 +5,7 @@ import errno
 import json
 import socket
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
@@ -424,7 +424,7 @@ async def test_compact_responses_uses_upstream_chatgpt_account_id_header(route: 
         chatgpt_account_id="upstream_chatgpt_account_id",
     )
 
-    assert client.calls[0]["headers"]["ChatGPT-Account-Id"] == "upstream_chatgpt_account_id"
+    assert client.calls[0]["headers"]["chatgpt-account-id"] == "upstream_chatgpt_account_id"
 
 
 @pytest.mark.asyncio
@@ -445,7 +445,7 @@ async def test_compact_responses_preserves_legacy_account_id_header(
         chatgpt_account_id=None,
     )
 
-    assert client.calls[0]["headers"]["ChatGPT-Account-Id"] == "legacy_upstream_account_id"
+    assert client.calls[0]["headers"]["chatgpt-account-id"] == "legacy_upstream_account_id"
 
 
 @pytest.mark.asyncio
@@ -1004,14 +1004,15 @@ async def test_stream_responses_keeps_missing_proxy_hostname_endpoint_scoped(
 async def test_responses_websocket_uses_codex_client_when_route_is_resolved(route: ResolvedUpstreamRoute) -> None:
     client = _WsCodexClient()
 
-    websocket = await connect_responses_websocket(
-        {"user-agent": "codex_cli_rs/0.142.0", "Origin": "https://chatgpt.test"},
-        "access",
-        "chatgpt_account",
-        base_url="https://chatgpt.test/backend-api",
-        route=route,
-        codex_client=cast(Any, client),
-    )
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        websocket = await connect_responses_websocket(
+            {"user-agent": "codex_cli_rs/0.142.0", "Origin": "https://chatgpt.test"},
+            "access",
+            "chatgpt_account",
+            base_url="https://chatgpt.test/backend-api",
+            route=route,
+            codex_client=cast(Any, client),
+        )
 
     await websocket.send_text('{"type":"response.create"}')
     message = await websocket.receive()
@@ -1021,8 +1022,9 @@ async def test_responses_websocket_uses_codex_client_when_route_is_resolved(rout
     assert message.text == '{"type":"response.completed"}'
     assert client.calls[0]["url"] == "wss://chatgpt.test/backend-api/codex/responses"
     assert client.calls[0]["route"] is route
-    # Native Codex UA is preserved unchanged through the responses websocket egress.
-    assert client.calls[0]["headers"]["user-agent"] == "codex_cli_rs/0.142.0"
+    # Fork behavior: the inbound Codex UA is normalized to the shared persona
+    # (canonical OS/arch/terminal) like every other client.
+    assert client.calls[0]["headers"]["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
     assert client.calls[0]["headers"]["Origin"] == "https://chatgpt.test"
     assert client.websocket.sent == ['{"type":"response.create"}']
     assert client.context.exited is True

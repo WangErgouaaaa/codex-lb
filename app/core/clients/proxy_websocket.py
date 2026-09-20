@@ -29,11 +29,9 @@ from app.core.clients.codex import (
     require_route_or_direct_egress_opt_in,
 )
 from app.core.clients.proxy import (
-    _CHATGPT_ACCOUNT_ID_HEADER,
     _HOP_BY_HOP_HEADER_NAMES,
     CODEX_INSTALLATION_ID_HEADER,
     ProxyResponseError,
-    _is_native_codex_request,
     _normalize_non_native_upstream_fingerprint,
     filter_inbound_headers,
 )
@@ -427,26 +425,21 @@ def _build_upstream_websocket_headers(
     )
     if installation_id:
         headers[CODEX_INSTALLATION_ID_HEADER] = installation_id
-    native = _is_native_codex_request(headers)
     lower_keys = {key.lower() for key in headers}
     if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
         request_id = get_request_id()
         if request_id:
             headers["x-request-id"] = request_id
-    # Normalize a non-native client's fingerprint on the client-facing
-    # ``/v1/responses`` websocket egress too. This builder is the upstream egress
-    # for a direct websocket caller, so without normalization an OpenAI SDK that
-    # speaks the responses websocket protocol would reach upstream with its
-    # ``OpenAI/Python`` / ``x-openai-client-*`` / ``x-stainless-*`` fingerprint
-    # intact and trigger the priority downgrade this change exists to prevent.
-    if not native:
-        _normalize_non_native_upstream_fingerprint(headers)
+    # Normalize every client's fingerprint on the client-facing
+    # ``/v1/responses`` websocket egress too (fork behavior: one shared persona
+    # on all egresses). This builder is the upstream egress for a direct
+    # websocket caller, so without normalization a client's real User-Agent /
+    # ``x-openai-client-*`` / ``x-stainless-*`` fingerprint would reach
+    # upstream instead of the shared codex_cli_rs persona.
+    _normalize_non_native_upstream_fingerprint(headers)
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
-        if native:
-            headers["chatgpt-account-id"] = account_id
-        else:
-            headers[_CHATGPT_ACCOUNT_ID_HEADER] = account_id
+        headers["chatgpt-account-id"] = account_id
     _ensure_responses_websocket_beta_header(headers)
     return headers
 

@@ -46,12 +46,14 @@ def test_non_native_sdk_http_request_is_rewritten_to_codex_cli_fingerprint():
     assert sum(key.lower() == "version" for key in headers) == 1
 
 
-def test_non_native_request_uses_pascalcase_account_header():
+def test_normalized_request_uses_lowercase_account_header():
     with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
         headers = _build_upstream_headers({"User-Agent": "OpenAI/Python 2.24.0"}, "tok", "acct-9")
 
-    assert headers["ChatGPT-Account-Id"] == "acct-9"
-    assert "chatgpt-account-id" not in headers
+    # Fork behavior (unify-upstream-fingerprint): every egress emits the
+    # account id under the same lowercase header.
+    assert headers["chatgpt-account-id"] == "acct-9"
+    assert "ChatGPT-Account-Id" not in headers
 
 
 def test_non_native_request_version_falls_back_to_settings_default():
@@ -70,26 +72,30 @@ def test_non_native_request_version_falls_back_to_settings_default():
     assert headers["originator"] == "codex_cli_rs"
 
 
-def test_native_codex_http_request_is_left_unchanged():
+def test_native_codex_http_request_is_normalized_to_shared_persona():
+    # Fork behavior: native Codex clients are normalized to the same shared
+    # codex_cli_rs persona as every other client; per-device fingerprints no
+    # longer pass through.
     native_ua = "codex_exec/0.142.1 (Mac OS 27.0.0; arm64) unknown (codex_exec; 0.142.1)"
-    headers = _build_upstream_headers(
-        {"User-Agent": native_ua, "originator": "codex_exec", "version": "0.142.1"},
-        "tok",
-        "acct-1",
-    )
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers(
+            {"User-Agent": native_ua, "originator": "codex_exec", "version": "0.142.1"},
+            "tok",
+            "acct-1",
+        )
 
-    assert headers["User-Agent"] == native_ua
-    assert headers["originator"] == "codex_exec"
-    assert headers["version"] == "0.142.1"
-    # Native requests keep the existing lowercase account header.
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.142.0"
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
 
 
-def test_codex_desktop_native_user_agent_is_left_unchanged():
+def test_codex_desktop_user_agent_is_normalized_to_shared_persona():
     native_ua = "Codex Desktop/0.142.0 (Mac OS 27.0.0; arm64) unknown (Codex Desktop; 26.616.71553)"
-    headers = _build_upstream_headers({"User-Agent": native_ua}, "tok", None)
-    assert headers["User-Agent"] == native_ua
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers({"User-Agent": native_ua}, "tok", None)
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
 
 
 def test_sdk_request_replaying_turn_state_is_still_normalized():
@@ -112,30 +118,32 @@ def test_sdk_request_replaying_turn_state_is_still_normalized():
     assert headers["x-codex-turn-state"] == "abc"
 
 
-def test_native_originator_header_marks_request_native():
-    # A native Codex originator identifies a first-party client and is left
-    # unchanged.
+def test_native_originator_header_is_normalized_to_shared_persona():
+    # A native Codex originator no longer marks a passthrough: the request is
+    # normalized to the shared persona like any other client.
     inbound = {"User-Agent": "OpenAI/Python 2.24.0", "originator": "codex_vscode"}
-    headers = _build_upstream_headers(inbound, "tok", None)
-    assert headers["User-Agent"] == "OpenAI/Python 2.24.0"
-    assert headers["originator"] == "codex_vscode"
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers(inbound, "tok", None)
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    assert headers["originator"] == "codex_cli_rs"
 
 
-def test_first_party_codex_sdk_ts_originator_is_native():
-    # Regression for the Codex P2 finding: codex_sdk_ts is a first-party Codex
-    # originator the backend whitelists (named in proposal.md). It must be
-    # treated as native so its User-Agent and originator are not rewritten.
+def test_first_party_codex_sdk_ts_originator_is_normalized_to_shared_persona():
+    # Fork behavior: codex_sdk_ts is a first-party Codex originator, but the
+    # unified-fingerprint change normalizes it to the shared persona too.
     inbound = {"User-Agent": "OpenAI/Node 5.0.0", "originator": "codex_sdk_ts"}
-    headers = _build_upstream_headers(inbound, "tok", None)
-    assert headers["User-Agent"] == "OpenAI/Node 5.0.0"
-    assert headers["originator"] == "codex_sdk_ts"
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers(inbound, "tok", None)
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    assert headers["originator"] == "codex_cli_rs"
 
 
-def test_codex_sdk_ts_user_agent_prefix_is_native():
-    # A codex_sdk_ts User-Agent prefix also identifies a first-party client.
+def test_codex_sdk_ts_user_agent_prefix_is_normalized_to_shared_persona():
+    # A codex_sdk_ts User-Agent prefix is also normalized to the shared persona.
     native_ua = "codex_sdk_ts/5.0.0 (Mac OS 27.0.0; arm64)"
-    headers = _build_upstream_headers({"User-Agent": native_ua}, "tok", "acct-1")
-    assert headers["User-Agent"] == native_ua
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers({"User-Agent": native_ua}, "tok", "acct-1")
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
 
@@ -164,22 +172,23 @@ def test_websocket_non_native_sdk_request_is_normalized():
     assert headers["originator"] == "codex_cli_rs"
     assert headers["version"] == "0.142.0"
     assert "Version" not in headers
-    # Non-native uses the PascalCase account header, mirroring the HTTP builder.
-    assert headers["ChatGPT-Account-Id"] == "acct-1"
-    assert "chatgpt-account-id" not in headers
+    # Every egress emits the account id under the same lowercase header.
+    assert headers["chatgpt-account-id"] == "acct-1"
+    assert "ChatGPT-Account-Id" not in headers
     # Continuity header is preserved for sticky routing.
     assert headers["x-codex-turn-state"] == "abc"
 
 
-def test_websocket_native_codex_request_is_left_unchanged():
-    # A first-party Codex websocket client must keep its native fingerprint and
-    # the existing lowercase account header.
+def test_websocket_native_codex_request_is_normalized_to_shared_persona():
+    # Fork behavior: a first-party Codex websocket client is normalized to the
+    # shared persona and the lowercase account header like every other client.
     from app.core.clients.proxy import _build_upstream_websocket_headers
 
     native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
     inbound = {"User-Agent": native_ua, "x-codex-turn-state": "abc"}
-    headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
-    assert headers["User-Agent"] == native_ua
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_websocket_headers(inbound, "tok", "acct-1")
+    assert headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
     assert headers["chatgpt-account-id"] == "acct-1"
     assert "ChatGPT-Account-Id" not in headers
     assert headers["x-codex-turn-state"] == "abc"

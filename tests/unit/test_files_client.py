@@ -21,11 +21,13 @@ import json
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, cast
+from unittest.mock import patch
 
 import aiohttp
 import pytest
 
 import app.core.clients.files as files_module
+from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.files import (
     OPENAI_FILE_UPLOAD_LIMIT_BYTES,
     OPENAI_FILE_USE_CASE,
@@ -91,14 +93,19 @@ async def test_create_file_returns_upstream_json_on_success() -> None:
     response_body = json.dumps({"file_id": "file_abc", "upload_url": "https://blob.example/sas?token=xyz"})
     session = _FakeSession([_FakeResponse(status=200, body=response_body)])
 
-    result = await create_file(
-        payload={"file_name": "page.pdf", "file_size": 1024, "use_case": OPENAI_FILE_USE_CASE},
-        headers={"User-Agent": "codex-cli/1.0", "x-codex-version": "1.2.3", "Authorization": "Bearer not-forwarded"},
-        access_token="upstream-token",
-        account_id="acc_1",
-        session=_client_session(session),
-        allow_direct_egress=True,
-    )
+    with patch.object(get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        result = await create_file(
+            payload={"file_name": "page.pdf", "file_size": 1024, "use_case": OPENAI_FILE_USE_CASE},
+            headers={
+                "User-Agent": "codex-cli/1.0",
+                "x-codex-version": "1.2.3",
+                "Authorization": "Bearer not-forwarded",
+            },
+            access_token="upstream-token",
+            account_id="acc_1",
+            session=_client_session(session),
+            allow_direct_egress=True,
+        )
 
     assert result == {"file_id": "file_abc", "upload_url": "https://blob.example/sas?token=xyz"}
     assert len(session.calls) == 1
@@ -107,9 +114,12 @@ async def test_create_file_returns_upstream_json_on_success() -> None:
     sent_headers = call["headers"]
     assert sent_headers["Authorization"] == "Bearer upstream-token"
     assert sent_headers["chatgpt-account-id"] == "acc_1"
-    # Forward UA + x-codex-* but NOT bulk inbound auth.
-    assert sent_headers["User-Agent"] == "codex-cli/1.0"
-    assert sent_headers["x-codex-version"] == "1.2.3"
+    # Fork behavior: the inbound UA is replaced by the shared codex_cli_rs
+    # persona and fingerprint headers (x-codex-version, x-openai-client-*) are
+    # stripped instead of forwarded; bulk inbound auth is still not forwarded.
+    assert sent_headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    assert "x-codex-version" not in sent_headers
+    assert "x-openai-client-version" not in sent_headers
     body = json.loads(call["data"])
     assert body == {"file_name": "page.pdf", "file_size": 1024, "use_case": "codex"}
 

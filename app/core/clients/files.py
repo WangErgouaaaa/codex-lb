@@ -36,7 +36,9 @@ from typing import Any
 import aiohttp
 
 from app.core.clients.codex import CodexClient, create_codex_session, require_route_or_direct_egress_opt_in
+from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import lease_http_session
+from app.core.clients.proxy import _strip_minimal_egress_fingerprint_headers, build_codex_user_agent
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.types import JsonValue
@@ -139,7 +141,11 @@ def _build_files_headers(
 
     Mirrors ``_build_upstream_transcribe_headers``: we omit bulk-forwarded
     inbound headers (which trigger upstream WAF rejections on /files) and
-    only forward ``User-Agent`` plus ``x-openai-*`` / ``x-codex-*`` keys.
+    forward only ``x-openai-*`` / ``x-codex-*`` keys. The User-Agent is
+    rewritten to the single shared codex_cli_rs persona (fork behavior: same
+    persona as the main egress) and SDK fingerprint headers are stripped via
+    the proxy.py helper, so upstream sees one client fingerprint instead of
+    the inbound client's real one.
     """
     headers: dict[str, str] = {}
     headers["Authorization"] = f"Bearer {access_token}"
@@ -147,12 +153,15 @@ def _build_files_headers(
     headers["Content-Type"] = "application/json"
     if account_id:
         headers["chatgpt-account-id"] = account_id
+    headers["User-Agent"] = build_codex_user_agent(get_codex_version_cache().cached_version_or_default())
     for key, value in inbound.items():
         lower = key.lower()
         if lower == "user-agent":
+            # Replaced by the shared persona above; never forward the inbound UA.
+            continue
+        if lower.startswith(_FILES_FORWARD_HEADER_PREFIXES):
             headers.setdefault(key, value)
-        elif lower.startswith(_FILES_FORWARD_HEADER_PREFIXES):
-            headers.setdefault(key, value)
+    _strip_minimal_egress_fingerprint_headers(headers)
     return headers
 
 

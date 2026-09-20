@@ -10,6 +10,7 @@ from typing import Protocol, TypeVar, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_MODEL_REGISTRY, get_cache_invalidation_poller
+from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import refresh_http_client
 from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
 from app.core.config.settings import get_settings
@@ -89,6 +90,15 @@ class ModelRefreshScheduler:
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
+            # Warm the Codex version cache every cycle regardless of leader
+            # election: run_if_leader() gates only the model-registry fetch, so
+            # a follower (or a leader with no ACTIVE accounts) would otherwise
+            # never call get_version() and every normalized outbound request
+            # would pin the stale static fallback version indefinitely. The
+            # cache TTL (1h) turns this 300s trigger into roughly hourly
+            # refreshes; a failed warm falls back without caching and retries
+            # on the next cycle.
+            await get_codex_version_cache().get_version()
             await self._refresh_once()
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.interval_seconds)

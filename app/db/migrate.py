@@ -84,6 +84,7 @@ _MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
             "idx_logs_status_error_time",
             "idx_logs_source_requested_at",
             "idx_logs_dash_usage_covering",
+            "idx_logs_missing_cost",
         }
     ),
     "additional_usage_history": frozenset({"ix_additional_usage_distinct_labels"}),

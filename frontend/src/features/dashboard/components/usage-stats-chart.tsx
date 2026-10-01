@@ -33,10 +33,12 @@ export type UsageStatsChartProps = {
   models: string[];
   hasOther: boolean;
   names: Record<string, string>;
+  formatValue?: (value: number) => string;
 };
 
-export function UsageStatsChart({ rows, models, hasOther, names }: UsageStatsChartProps) {
+export function UsageStatsChart({ rows, models, hasOther, names, formatValue }: UsageStatsChartProps) {
   const legendFormatter = (value: unknown) => names[String(value)] ?? String(value);
+  const format = formatValue ?? ((value: number) => formatCompactNumber(value));
 
   return (
     <div className="h-[260px]" data-testid="usage-stats-chart">
@@ -55,7 +57,7 @@ export function UsageStatsChart({ rows, models, hasOther, names }: UsageStatsCha
             tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
             axisLine={false}
             tickLine={false}
-            tickFormatter={(value: number) => formatCompactNumber(value)}
+            tickFormatter={(value: number) => format(value)}
             width={46}
           />
           <Tooltip
@@ -63,7 +65,7 @@ export function UsageStatsChart({ rows, models, hasOther, names }: UsageStatsCha
             content={
               <ChartTooltip
                 names={names}
-                formatValue={(value: number) => formatCompactNumber(value)}
+                formatValue={(value: number) => format(value)}
               />
             }
           />

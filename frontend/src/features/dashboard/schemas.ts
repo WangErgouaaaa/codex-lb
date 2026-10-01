@@ -180,6 +180,7 @@ export const RequestLogSchema = z.object({
   serviceTier: z.string().nullable().optional().default(null),
   requestedServiceTier: z.string().nullable().optional().default(null),
   actualServiceTier: z.string().nullable().optional().default(null),
+  actualModel: z.string().nullable().optional().default(null),
   status: z.string(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
@@ -262,6 +263,10 @@ export const UsageStatsRangeSchema = z.enum(["today", "7d", "30d"]);
 export type UsageStatsRange = z.infer<typeof UsageStatsRangeSchema>;
 export const DEFAULT_USAGE_STATS_RANGE: UsageStatsRange = "today";
 
+export const UsageStatsMetricSchema = z.enum(["tokens", "credits", "cost"]);
+export type UsageStatsMetric = z.infer<typeof UsageStatsMetricSchema>;
+export const DEFAULT_USAGE_STATS_METRIC: UsageStatsMetric = "tokens";
+
 export function parseUsageStatsRange(value: string | null | undefined): UsageStatsRange {
   const parsed = UsageStatsRangeSchema.safeParse(value);
   return parsed.success ? parsed.data : DEFAULT_USAGE_STATS_RANGE;
@@ -276,6 +281,9 @@ const UsageStatsSummarySchema = z.object({
   totalErrors: z.number(),
   modelCount: z.number(),
   avgTokensPerDay: z.number(),
+  totalCostUsd: z.number().optional().default(0),
+  totalCredits: z.number().optional().default(0),
+  attributedRequests: z.number().optional().default(0),
 });
 
 const UsageModelEntrySchema = z.object({
@@ -286,6 +294,8 @@ const UsageModelEntrySchema = z.object({
   cachedInputTokens: z.number(),
   totalTokens: z.number(),
   percentage: z.number(),
+  costUsd: z.number().optional().default(0),
+  credits: z.number().optional().default(0),
 });
 
 const UsageSeriesBucketSchema = z.object({
@@ -303,6 +313,7 @@ export const UsageStatsResponseSchema = z.object({
   summary: UsageStatsSummarySchema,
   byModel: z.array(UsageModelEntrySchema),
   series: z.array(UsageSeriesBucketSchema),
+  metric: UsageStatsMetricSchema.optional().default("tokens"),
 });
 
 export type UsageStatsSummary = z.infer<typeof UsageStatsSummarySchema>;

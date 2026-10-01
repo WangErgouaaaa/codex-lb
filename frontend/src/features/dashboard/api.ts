@@ -8,6 +8,7 @@ import {
   RequestLogsResponseSchema,
   UsageStatsResponseSchema,
   type OverviewTimeframe,
+  type UsageStatsMetric,
   type UsageStatsRange,
 } from "@/features/dashboard/schemas";
 
@@ -91,12 +92,14 @@ export function getRequestLogs(params: RequestLogsListFilters = {}) {
 
 export type UsageStatsParams = {
   range?: UsageStatsRange;
+  metric?: UsageStatsMetric;
   timezone?: string;
 };
 
 export function getUsageStats(params: UsageStatsParams = {}) {
   const query = new URLSearchParams();
   query.set("range", params.range ?? "7d");
+  query.set("metric", params.metric ?? "tokens");
   if (params.timezone) {
     query.set("timezone", params.timezone);
   }

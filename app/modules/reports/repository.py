@@ -83,6 +83,7 @@ class UsageModelAggregateRow:
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int
+    cost_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,7 @@ class UsageModelBucketRow:
     input_tokens: int
     output_tokens: int
     cached_input_tokens: int
+    cost_usd: float = 0.0
 
 
 class ReportsRepository:
@@ -326,6 +328,7 @@ class ReportsRepository:
                 func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
                 func.coalesce(func.sum(output_tokens), 0).label("output_tokens"),
                 func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
             )
             .where(and_(*_report_conditions(start_date, end_date, None, None, None)))
             .group_by(model_bucket)
@@ -339,6 +342,7 @@ class ReportsRepository:
                 input_tokens=int(row.input_tokens or 0),
                 output_tokens=int(row.output_tokens or 0),
                 cached_input_tokens=int(row.cached_input_tokens or 0),
+                cost_usd=float(row.cost_usd or 0.0),
             )
             for row in result.all()
         ]
@@ -359,6 +363,7 @@ class ReportsRepository:
                     input_tokens=int(row.input_tokens or 0),
                     output_tokens=int(row.output_tokens or 0),
                     cached_input_tokens=int(row.cached_input_tokens or 0),
+                    cost_usd=float(row.cost_usd or 0.0),
                 )
                 for row in result.all()
             )
@@ -679,6 +684,7 @@ def _usage_bucket_rows_stmt(bucket_ranges: list[tuple[str, str, datetime, dateti
             func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
             func.coalesce(func.sum(output_tokens), 0).label("output_tokens"),
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
         )
         .select_from(
             bucket_ranges_cte.outerjoin(

@@ -56,6 +56,7 @@ from app.core.resilience.memory_monitor import configure as configure_memory_mon
 from app.core.retention.scheduler import build_data_retention_scheduler
 from app.core.scheduling.leader_election import get_leader_election
 from app.core.shutdown import close_control_plane_task_admission
+from app.core.usage.metadata_scheduler import build_metadata_refresh_scheduler
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
@@ -100,6 +101,7 @@ from app.modules.sticky_sessions.cleanup_scheduler import (
 )
 from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
+from app.modules.usage.credit_attribution_scheduler import build_credit_attribution_scheduler
 from app.modules.usage.live_ingest import start_live_usage_ingestor, stop_live_usage_ingestor
 
 logger = logging.getLogger(__name__)
@@ -386,6 +388,7 @@ async def lifespan(app: FastAPI):
 
     await cache_poller.start()
 
+    metadata_scheduler = build_metadata_refresh_scheduler()
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
@@ -395,8 +398,10 @@ async def lifespan(app: FastAPI):
     automations_scheduler = build_automations_scheduler()
     rate_limit_reset_credits_scheduler = build_rate_limit_reset_credits_scheduler()
     account_usage_rollup_scheduler = build_account_usage_rollup_scheduler()
+    credit_attribution_scheduler = build_credit_attribution_scheduler()
     data_retention_scheduler = build_data_retention_scheduler()
     start_live_usage_ingestor()
+    await metadata_scheduler.start()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
     await model_scheduler.start()
@@ -406,6 +411,7 @@ async def lifespan(app: FastAPI):
     await automations_scheduler.start()
     await rate_limit_reset_credits_scheduler.start()
     await account_usage_rollup_scheduler.start()
+    await credit_attribution_scheduler.start()
     await data_retention_scheduler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
@@ -591,6 +597,7 @@ async def lifespan(app: FastAPI):
         await auth_guardian_scheduler.stop()
         await automations_scheduler.stop()
         await sticky_session_cleanup_scheduler.stop()
+        await metadata_scheduler.stop()
         await model_scheduler.stop()
         # Stop the invalidation poller only after the model scheduler: a final
         # leader tick may still bump through the installed poller.
@@ -603,6 +610,7 @@ async def lifespan(app: FastAPI):
         await stop_live_usage_ingestor()
         await rate_limit_reset_credits_scheduler.stop()
         await account_usage_rollup_scheduler.stop()
+        await credit_attribution_scheduler.stop()
         await data_retention_scheduler.stop()
         # Release the scheduler leader lease only after every leader-gated
         # scheduler has stopped so no local tick re-acquires it; followers can

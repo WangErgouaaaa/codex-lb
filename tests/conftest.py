@@ -157,6 +157,23 @@ def _disable_account_usage_rollup_scheduler_startup(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_credit_attribution_scheduler_startup(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "build_credit_attribution_scheduler", lambda: _NoopScheduler())
+
+
+@pytest.fixture(autouse=True)
+def _disable_metadata_refresh_scheduler_startup(monkeypatch):
+    # The metadata scheduler refreshes prices over the network on its first
+    # tick; under the test lifespan that outbound fetch can wedge teardown on
+    # Windows IOCP, and tests must not hit models.dev/litellm anyway.
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "build_metadata_refresh_scheduler", lambda: _NoopScheduler())
+
+
+@pytest.fixture(autouse=True)
 def _disable_data_retention_scheduler_startup(monkeypatch):
     import app.main as main_module
 

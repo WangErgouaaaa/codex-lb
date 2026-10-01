@@ -49,6 +49,7 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
     timezone: "UTC",
     startDate: "2026-10-01",
     endDate: "2026-10-01",
+    metric: "tokens",
     summary: {
       totalTokens: 1_234_567,
       totalInputTokens: 1_000_000,
@@ -58,6 +59,9 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
       totalErrors: 2,
       modelCount: 2,
       avgTokensPerDay: 1_234_567,
+      totalCostUsd: 8.05,
+      totalCredits: 36.0,
+      attributedRequests: 10,
     },
     byModel: [
       {
@@ -68,6 +72,8 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
         cachedInputTokens: 30_000,
         totalTokens: 1_080_000,
         percentage: 87.5,
+        costUsd: 7.75,
+        credits: 30.0,
       },
       {
         model: "gpt-sol",
@@ -77,6 +83,8 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
         cachedInputTokens: 4_567,
         totalTokens: 154_567,
         percentage: 12.5,
+        costUsd: 0.3,
+        credits: 6.0,
       },
     ],
     series: [
@@ -148,6 +156,8 @@ describe("UsageStatsPanel", () => {
           cachedInputTokens: 50,
           totalTokens: 1_000,
           percentage: 10,
+          costUsd: 0.1,
+          credits: 1.5,
         })),
         series: [{ bucket: "2026-10-01", label: "10-01", values }],
       }),
@@ -177,13 +187,31 @@ describe("UsageStatsPanel", () => {
 
     render(<UsageStatsPanel />);
 
-    expect(useUsageStatsMock).toHaveBeenNthCalledWith(1, "today", expect.anything());
+    expect(useUsageStatsMock).toHaveBeenNthCalledWith(1, "today", "tokens", expect.anything());
 
     await user.click(screen.getByRole("button", { name: "Last 7 days" }));
-    expect(useUsageStatsMock).toHaveBeenLastCalledWith("7d", expect.anything());
+    expect(useUsageStatsMock).toHaveBeenLastCalledWith("7d", "tokens", expect.anything());
 
     await user.click(screen.getByRole("button", { name: "Last 30 days" }));
-    expect(useUsageStatsMock).toHaveBeenLastCalledWith("30d", expect.anything());
+    expect(useUsageStatsMock).toHaveBeenLastCalledWith("30d", "tokens", expect.anything());
+  });
+
+  it("switches the metric and renders credits and cost columns", async () => {
+    mockQueryData(makeResponse());
+    const user = userEvent.setup();
+
+    render(<UsageStatsPanel />);
+
+    // Token metric is the default; table carries the credits and cost columns.
+    expect(await screen.findByText("Token usage by model (stacked)")).toBeInTheDocument();
+    expect(screen.getAllByText("Credits").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Cost")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Credits (real)" }));
+    expect(useUsageStatsMock).toHaveBeenLastCalledWith("today", "credits", expect.anything());
+
+    await user.click(screen.getByRole("button", { name: "Cost (API-equiv.)" }));
+    expect(useUsageStatsMock).toHaveBeenLastCalledWith("today", "cost", expect.anything());
   });
 
   it("shows the empty state when the range has no usage", async () => {
@@ -198,6 +226,9 @@ describe("UsageStatsPanel", () => {
           totalErrors: 0,
           modelCount: 0,
           avgTokensPerDay: 0,
+          totalCostUsd: 0,
+          totalCredits: 0,
+          attributedRequests: 0,
         },
         byModel: [],
         series: [{ bucket: "2026-10-01T00", label: "00:00", values: {} }],

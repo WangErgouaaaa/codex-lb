@@ -79,7 +79,12 @@ async def test_retention_disabled_by_default_deletes_nothing(db_setup):
         await session.commit()
 
     deleted = await run_retention_pass(now=now)
-    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    assert deleted == {
+        "request_logs": 0,
+        "usage_history": 0,
+        "additional_usage_history": 0,
+        "usage_window_snapshots": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -641,7 +646,12 @@ async def test_dashboard_zero_disables_retention_despite_env_alias(db_setup, mon
     await _set_dashboard_retention(usage_history=0)
 
     deleted = await run_retention_pass(now=now)
-    assert deleted == {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    assert deleted == {
+        "request_logs": 0,
+        "usage_history": 0,
+        "additional_usage_history": 0,
+        "usage_window_snapshots": 0,
+    }
     async with SessionLocal() as session:
         assert len((await session.execute(select(UsageHistory.id))).scalars().all()) == 2
 

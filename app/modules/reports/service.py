@@ -27,6 +27,7 @@ from app.modules.reports.schemas import (
     UsageStatsSummary,
     UserAgentCostEntry,
 )
+from app.modules.usage.credit_aggregation import CreditAttributionRepository
 
 
 class InvalidReportDateRangeError(ValueError):
@@ -34,11 +35,17 @@ class InvalidReportDateRangeError(ValueError):
 
 
 USAGE_STATS_RANGES = ("today", "7d", "30d")
+USAGE_STATS_METRICS = ("tokens", "cost", "credits")
+# Credits are read from the weekly window: it is the real subscription budget.
+CREDITS_WINDOW = "secondary"
 
 
 class ReportsService:
-    def __init__(self, repository: ReportsRepository) -> None:
+    def __init__(
+        self, repository: ReportsRepository, credit_repository: CreditAttributionRepository | None = None
+    ) -> None:
         self._repository = repository
+        self._credit_repository = credit_repository
 
     async def get_reports(
         self,
@@ -173,9 +180,12 @@ class ReportsService:
         self,
         range_key: str = "7d",
         report_timezone: str | None = None,
+        metric: str = "tokens",
     ) -> UsageStatsResponse:
         if range_key not in USAGE_STATS_RANGES:
             raise ValueError(f"range must be one of {', '.join(USAGE_STATS_RANGES)}")
+        if metric not in USAGE_STATS_METRICS:
+            raise ValueError(f"metric must be one of {', '.join(USAGE_STATS_METRICS)}")
 
         timezone_info = _resolve_timezone(report_timezone)
         now = utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info)
@@ -201,34 +211,94 @@ class ReportsService:
         bucket_ranges = build_usage_bucket_ranges(start_date, end_date, timezone_info, bucket)
         series_rows = await self._repository.aggregate_usage_by_model_bucket(bucket_ranges)
 
+        # Real subscription credit consumption (weekly window = the actual
+        # budget), attributed from account usage-window snapshot deltas.
+        credits_by_model: dict[str, float] = {}
+        total_credits = 0.0
+        attributed_requests = 0
+        credit_bucket_rows = []
+        if self._credit_repository is not None:
+            credit_rows = await self._credit_repository.aggregate_credits_by_model(start_at, end_at, CREDITS_WINDOW)
+            credits_by_model = {row.model: row.credits_sum for row in credit_rows}
+            total_credits = sum(credits_by_model.values())
+            attributed_requests = sum(row.request_count for row in credit_rows)
+            credit_bucket_rows = await self._credit_repository.aggregate_credits_by_model_bucket(
+                bucket_ranges, CREDITS_WINDOW
+            )
+
         total_tokens = summary.total_input_tokens + summary.total_output_tokens + summary.total_cached_tokens
+        total_cost_usd = sum(row.cost_usd for row in model_rows)
+        all_models = {row.model for row in model_rows} | set(credits_by_model)
+
+        metric_totals: dict[str, float] = {
+            "tokens": total_tokens,
+            "cost": total_cost_usd,
+            "credits": total_credits,
+        }
+        metric_total = metric_totals[metric]
+
+        def metric_value(model: str) -> float:
+            if metric == "cost":
+                return next((row.cost_usd for row in model_rows if row.model == model), 0.0)
+            if metric == "credits":
+                return credits_by_model.get(model, 0.0)
+            return next(
+                (
+                    row.input_tokens + row.output_tokens + row.cached_input_tokens
+                    for row in model_rows
+                    if row.model == model
+                ),
+                0,
+            )
+
         by_model = [
             UsageModelEntry(
-                model=row.model,
-                requests=row.requests,
-                input_tokens=row.input_tokens,
-                output_tokens=row.output_tokens,
-                cached_input_tokens=row.cached_input_tokens,
-                total_tokens=row.input_tokens + row.output_tokens + row.cached_input_tokens,
-                percentage=round(
-                    (row.input_tokens + row.output_tokens + row.cached_input_tokens) / total_tokens * 100,
-                    1,
-                )
-                if total_tokens > 0
-                else 0.0,
+                model=model,
+                requests=next((row.requests for row in model_rows if row.model == model), 0),
+                input_tokens=next((row.input_tokens for row in model_rows if row.model == model), 0),
+                output_tokens=next((row.output_tokens for row in model_rows if row.model == model), 0),
+                cached_input_tokens=next((row.cached_input_tokens for row in model_rows if row.model == model), 0),
+                total_tokens=next(
+                    (
+                        row.input_tokens + row.output_tokens + row.cached_input_tokens
+                        for row in model_rows
+                        if row.model == model
+                    ),
+                    0,
+                ),
+                percentage=round(metric_value(model) / metric_total * 100, 1) if metric_total > 0 else 0.0,
+                cost_usd=round(next((row.cost_usd for row in model_rows if row.model == model), 0.0), 4),
+                credits=round(credits_by_model.get(model, 0.0), 2),
             )
-            for row in model_rows
+            for model in all_models
         ]
+        by_model.sort(key=lambda entry: metric_value(entry.model), reverse=True)
 
-        values_by_bucket: dict[str, dict[str, int]] = {}
-        for row in series_rows:
-            if row.requests == 0 and row.model == UNKNOWN_MODEL_BUCKET:
-                continue
-            bucket_values = values_by_bucket.setdefault(row.bucket_key, {})
-            bucket_values[row.model] = row.input_tokens + row.output_tokens + row.cached_input_tokens
+        values_by_bucket: dict[str, dict[str, float]] = {}
+        if metric == "credits":
+            # Credit rows come from their own CTE over the same bucket ranges;
+            # build the series directly from them so models without token
+            # rows in a bucket are not lost.
+            for row in credit_bucket_rows:
+                if row.request_count == 0 and row.model == UNKNOWN_MODEL_BUCKET:
+                    continue
+                values_by_bucket.setdefault(row.bucket_key, {})[row.model] = row.credits_sum
+        else:
+            for row in series_rows:
+                if row.requests == 0 and row.model == UNKNOWN_MODEL_BUCKET:
+                    continue
+                bucket_values = values_by_bucket.setdefault(row.bucket_key, {})
+                if metric == "cost":
+                    bucket_values[row.model] = row.cost_usd
+                else:
+                    bucket_values[row.model] = row.input_tokens + row.output_tokens + row.cached_input_tokens
 
         series = [
-            UsageSeriesBucket(bucket=bucket_key, label=bucket_label, values=values_by_bucket.get(bucket_key, {}))
+            UsageSeriesBucket(
+                bucket=bucket_key,
+                label=bucket_label,
+                values={model: round(value, 2) for model, value in values_by_bucket.get(bucket_key, {}).items()},
+            )
             for bucket_key, bucket_label, _bucket_start, _bucket_end in bucket_ranges
         ]
 
@@ -248,9 +318,13 @@ class ReportsService:
                 total_errors=summary.total_errors,
                 model_count=len(by_model),
                 avg_tokens_per_day=round(total_tokens / window_days, 1) if total_tokens > 0 else 0.0,
+                total_cost_usd=round(total_cost_usd, 4),
+                total_credits=round(total_credits, 2),
+                attributed_requests=attributed_requests,
             ),
             by_model=by_model,
             series=series,
+            metric=metric,
         )
 
 

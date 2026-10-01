@@ -9,7 +9,13 @@ from sqlalchemy import delete, func, select
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.utils.time import utcnow
-from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
+from app.db.models import (
+    AccountUsageRollupState,
+    AdditionalUsageHistory,
+    RequestLog,
+    UsageHistory,
+    UsageWindowSnapshot,
+)
 from app.db.session import get_background_session, sqlite_writer_section
 from app.modules.accounts.usage_rollup import FOLD_LAG
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
@@ -58,10 +64,16 @@ async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
     """Prune aged rows per the effective retention settings. Returns rows deleted per table."""
     retention = await get_effective_retention()
     now = now or utcnow()
-    deleted = {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0}
+    deleted = {"request_logs": 0, "usage_history": 0, "additional_usage_history": 0, "usage_window_snapshots": 0}
     if retention.request_log_days:
         cutoff = now - timedelta(days=retention.request_log_days)
         deleted["request_logs"] = await _prune_request_logs(cutoff, now=now)
+        # Snapshots only feed credit attribution of request logs, so they live
+        # on the same retention window (attribution reprocesses at most ~2h of
+        # them after a restart, far inside any retention horizon). Attributed
+        # rows themselves cascade with their request_logs rows via the
+        # request_logs FK (PRAGMA foreign_keys=ON on every SQLite connection).
+        deleted["usage_window_snapshots"] = await _prune_usage_window_snapshots(cutoff)
     if retention.usage_history_days:
         cutoff = now - timedelta(days=retention.usage_history_days)
         deleted["usage_history"] = await _prune_usage_history(cutoff)
@@ -69,10 +81,12 @@ async def run_retention_pass(*, now: datetime | None = None) -> dict[str, int]:
     total = sum(deleted.values())
     if total:
         logger.info(
-            "Retention pruned rows request_logs=%s usage_history=%s additional_usage_history=%s",
+            "Retention pruned rows request_logs=%s usage_history=%s additional_usage_history=%s "
+            "usage_window_snapshots=%s",
             deleted["request_logs"],
             deleted["usage_history"],
             deleted["additional_usage_history"],
+            deleted["usage_window_snapshots"],
         )
     return deleted
 
@@ -219,9 +233,22 @@ async def _prune_additional_usage_history(cutoff: datetime) -> int:
     )
 
 
+async def _prune_usage_window_snapshots(cutoff: datetime) -> int:
+    # No protected set: snapshot rows are pure differencing inputs — once older
+    # than the retention window they can never be reprocessed (restarts replay
+    # at most ~2h), so every aged row is prunable.
+    return await _batched_prune(
+        UsageWindowSnapshot,
+        cutoff_condition=UsageWindowSnapshot.captured_at < cutoff,
+        protected_stmt=None,
+    )
+
+
 async def _batched_prune(model, *, cutoff_condition, protected_stmt) -> int:
     async with get_background_session() as session:
-        protected_ids = list((await session.execute(protected_stmt)).scalars().all())
+        protected_ids = (
+            list((await session.execute(protected_stmt)).scalars().all()) if protected_stmt is not None else []
+        )
 
     total = 0
     while True:

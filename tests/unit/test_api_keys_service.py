@@ -9,6 +9,8 @@ from typing import Any, cast
 import pytest
 from sqlalchemy.exc import OperationalError
 
+from app.core.usage import pricing_catalog
+from app.core.usage.pricing import DEFAULT_PRICING_MODELS
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -154,6 +156,8 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         account_assignment_scope_enabled: bool | _Unset = _UNSET,
         source_assignment_scope_enabled: bool | _Unset = _UNSET,
         expires_at: datetime | None | _Unset = _UNSET,
+        allowed_hours_start: str | None | _Unset = _UNSET,
+        allowed_hours_end: str | None | _Unset = _UNSET,
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
         key_prefix: str | _Unset = _UNSET,
@@ -176,6 +180,8 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "account_assignment_scope_enabled": account_assignment_scope_enabled,
             "source_assignment_scope_enabled": source_assignment_scope_enabled,
             "expires_at": expires_at,
+            "allowed_hours_start": allowed_hours_start,
+            "allowed_hours_end": allowed_hours_end,
             "is_active": is_active,
             "key_hash": key_hash,
             "key_prefix": key_prefix,
@@ -1990,15 +1996,18 @@ async def test_record_usage_cost_limit_uses_flex_service_tier_pricing() -> None:
     [
         ("gpt-5.6", 286_720, 31_000_000),
         ("gpt-5.6-sol-snapshot", 286_720, 31_000_000),
-        ("gpt-5.6-terra-snapshot", 143_360, 15_500_000),
-        ("gpt-5.6-luna-snapshot", 57_344, 6_200_000),
+        ("gpt-5.6-terra-snapshot", 114_688, 12_400_000),
+        ("gpt-5.6-luna-snapshot", 11_468, 1_240_000),
     ],
 )
 async def test_usage_reservation_uses_gpt_5_6_personality_pricing(
     model: str,
     expected_reserved_microdollars: int,
     expected_final_microdollars: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Exercise reservation/settlement against fixed rates, independent of daily catalog updates.
+    monkeypatch.setattr(pricing_catalog, "_prices", dict(DEFAULT_PRICING_MODELS))
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
     created = await service.create_key(

@@ -83,6 +83,9 @@ class UsageStatsSummary(DashboardModel):
     total_errors: int
     model_count: int
     avg_tokens_per_day: float
+    total_cost_usd: float = 0.0
+    total_credits: float = 0.0
+    attributed_requests: int = 0
 
 
 class UsageModelEntry(DashboardModel):
@@ -93,12 +96,14 @@ class UsageModelEntry(DashboardModel):
     cached_input_tokens: int
     total_tokens: int
     percentage: float
+    cost_usd: float = 0.0
+    credits: float = 0.0
 
 
 class UsageSeriesBucket(DashboardModel):
     bucket: str
     label: str
-    values: dict[str, int]
+    values: dict[str, float]
 
 
 class UsageStatsResponse(DashboardModel):
@@ -110,3 +115,4 @@ class UsageStatsResponse(DashboardModel):
     summary: UsageStatsSummary
     by_model: list[UsageModelEntry] = Field(default_factory=list)
     series: list[UsageSeriesBucket] = Field(default_factory=list)
+    metric: str = "tokens"

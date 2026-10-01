@@ -43,6 +43,7 @@ from app.modules.request_logs.service import RequestLogsService
 from app.modules.settings.repository import SettingsRepository
 from app.modules.settings.service import SettingsService
 from app.modules.sticky_sessions.service import StickySessionsService
+from app.modules.usage.credit_aggregation import CreditAttributionRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.service import UsageService
 
@@ -331,7 +332,7 @@ def get_reports_context(
     session: AsyncSession = Depends(get_session),
 ) -> ReportsContext:
     repository = ReportsRepository(session)
-    service = ReportsService(repository)
+    service = ReportsService(repository, CreditAttributionRepository(session))
     return ReportsContext(session=session, repository=repository, service=service)
 
 

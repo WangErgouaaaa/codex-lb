@@ -16,6 +16,7 @@ from app.db.session import get_background_session
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import UsageRepository
+from app.modules.usage.snapshot_writer import UsageWindowSnapshotWriter
 
 logger = logging.getLogger(__name__)
 
@@ -267,10 +268,32 @@ class LiveUsageIngestor:
 
 
 _ingestor: LiveUsageIngestor | None = None
+_snapshot_writer: UsageWindowSnapshotWriter | None = None
+
+
+def _chained_live_publisher(usage_history_publish, snapshot_publish):
+    """Single hub publisher that fans out to BOTH consumers.
+
+    The core client layer publishes through one global hub slot; chaining here
+    keeps the existing usage-history ingestor as the first consumer (unchanged
+    ordering and behavior) while the durable snapshot writer persists the same
+    parsed snapshot for credit attribution. Neither consumer may raise.
+    """
+
+    def publish(
+        snapshot: LiveRateLimitSnapshot,
+        *,
+        account_id: str | None = None,
+        chatgpt_account_id: str | None = None,
+    ) -> None:
+        usage_history_publish(snapshot, account_id=account_id, chatgpt_account_id=chatgpt_account_id)
+        snapshot_publish(snapshot, account_id=account_id, chatgpt_account_id=chatgpt_account_id)
+
+    return publish
 
 
 def start_live_usage_ingestor() -> LiveUsageIngestor | None:
-    global _ingestor
+    global _ingestor, _snapshot_writer
     settings = get_settings()
     if not getattr(settings, "live_usage_ingestion_enabled", True):
         register_live_usage_publisher(None)
@@ -280,15 +303,22 @@ def start_live_usage_ingestor() -> LiveUsageIngestor | None:
         write_min_interval_seconds=_WRITE_MIN_INTERVAL_SECONDS,
     )
     ingestor.start()
-    register_live_usage_publisher(ingestor.publish)
+    snapshot_writer = UsageWindowSnapshotWriter()
+    snapshot_writer.start()
+    register_live_usage_publisher(_chained_live_publisher(ingestor.publish, snapshot_writer.publish))
     _ingestor = ingestor
+    _snapshot_writer = snapshot_writer
     return ingestor
 
 
 async def stop_live_usage_ingestor() -> None:
-    global _ingestor
+    global _ingestor, _snapshot_writer
     ingestor = _ingestor
+    snapshot_writer = _snapshot_writer
     _ingestor = None
+    _snapshot_writer = None
     register_live_usage_publisher(None)
     if ingestor is not None:
         await ingestor.stop()
+    if snapshot_writer is not None:
+        await snapshot_writer.stop()

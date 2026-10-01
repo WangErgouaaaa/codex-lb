@@ -2187,6 +2187,21 @@ Index(
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
+    "idx_logs_missing_cost",
+    RequestLog.model_source_id,
+    RequestLog.id,
+    postgresql_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+    sqlite_where=text(
+        "cost_usd IS NULL AND model_source_id IS NULL AND input_tokens IS NOT NULL "
+        "AND (output_tokens IS NOT NULL OR reasoning_tokens IS NOT NULL) "
+        "AND (model_source_kind IS NULL OR model_source_kind = 'subscription')"
+    ),
+)
+Index(
     "idx_logs_deleted_at_requested_at_id",
     RequestLog.deleted_at,
     RequestLog.requested_at.desc(),
@@ -2378,3 +2393,74 @@ Index(
     AdditionalUsageHistory.used_percent.desc(),
     AdditionalUsageHistory.id.desc(),
 )
+
+
+class UsageWindowSnapshot(Base):
+    """Durable account usage-window snapshots for credit attribution.
+
+    Written from the live usage publisher (upstream ``x-codex-*`` rate-limit
+    response headers) and from usage polling. Consecutive snapshots per
+    account are differenced by the credit attribution pass to estimate real
+    subscription credit consumption. Only percentages are stored — window
+    capacities are resolved at attribution time so plan changes never rewrite
+    history. ``request_log_id`` links a snapshot to the response whose
+    headers carried it, when known.
+    """
+
+    __tablename__ = "usage_window_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, nullable=False)
+    chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    request_log_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String, nullable=False, server_default=text("'response'"))
+    primary_used_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    primary_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    primary_reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    secondary_used_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    secondary_window_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    secondary_reset_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_usage_snapshots_account_captured",
+            account_id,
+            captured_at,
+            id,
+        ),
+    )
+
+
+class RequestCreditAttribution(Base):
+    """Estimated real credit consumption attributed to a single request.
+
+    Derived from consecutive :class:`UsageWindowSnapshot` deltas on the
+    account; ``window`` is ``primary`` (5h) or ``secondary`` (weekly).
+    Parallel in-flight requests share a delta proportionally to their token
+    footprint, so per-request values are estimates — aggregate views are the
+    meaningful readout. One row per (request, window), enforced unique so the
+    attribution pass stays idempotent across restarts.
+    """
+
+    __tablename__ = "request_credit_attributions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_log_id: Mapped[int] = mapped_column(
+        ForeignKey("request_logs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    account_id: Mapped[str] = mapped_column(String, nullable=False)
+    window: Mapped[str] = mapped_column(String(16), nullable=False)
+    credits: Mapped[float] = mapped_column(Float, nullable=False)
+    snapshot_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    attributed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("request_log_id", "window", name="uq_credit_attribution_request_window"),
+        Index(
+            "ix_credit_attributions_account_at",
+            account_id,
+            attributed_at,
+        ),
+    )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from itertools import batched
 from zoneinfo import ZoneInfo
 
@@ -16,6 +16,9 @@ _SQLITE_COMPOUND_SELECT_LIMIT = 500
 MAX_DAILY_REPORT_DAYS = 730
 UNKNOWN_USERAGENT_GROUP = "Unknown"
 MISSING_USERAGENT_GROUP = "Missing User-Agent"
+UNKNOWN_MODEL_BUCKET = "unknown"
+USAGE_BUCKET_HOUR = "hour"
+USAGE_BUCKET_DAY = "day"
 _CONVERSATION_WHITESPACE = " \t\n\v\f\r"
 
 
@@ -71,6 +74,26 @@ class UserAgentAggregateRow:
     useragent_group: str
     cost_usd: float
     request_count: int
+
+
+@dataclass(frozen=True)
+class UsageModelAggregateRow:
+    model: str
+    requests: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+
+
+@dataclass(frozen=True)
+class UsageModelBucketRow:
+    bucket_key: str
+    bucket_label: str
+    model: str
+    requests: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
 
 
 class ReportsRepository:
@@ -282,6 +305,64 @@ class ReportsRepository:
             )
             for row in result.all()
         ]
+
+    async def aggregate_usage_by_model(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> list[UsageModelAggregateRow]:
+        model_bucket = _usage_model_bucket_expr()
+        output_tokens = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        total_tokens_expr = (
+            func.coalesce(func.sum(RequestLog.input_tokens), 0)
+            + func.coalesce(func.sum(output_tokens), 0)
+            + func.coalesce(func.sum(RequestLog.cached_input_tokens), 0)
+        )
+
+        stmt = (
+            select(
+                model_bucket.label("model"),
+                func.count().label("requests"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+            )
+            .where(and_(*_report_conditions(start_date, end_date, None, None, None)))
+            .group_by(model_bucket)
+            .order_by(total_tokens_expr.desc())
+        )
+        result = await self._session.execute(stmt)
+        return [
+            UsageModelAggregateRow(
+                model=row.model,
+                requests=int(row.requests or 0),
+                input_tokens=int(row.input_tokens or 0),
+                output_tokens=int(row.output_tokens or 0),
+                cached_input_tokens=int(row.cached_input_tokens or 0),
+            )
+            for row in result.all()
+        ]
+
+    async def aggregate_usage_by_model_bucket(
+        self,
+        bucket_ranges: list[tuple[str, str, datetime, datetime]],
+    ) -> list[UsageModelBucketRow]:
+        rows: list[UsageModelBucketRow] = []
+        for bucket_ranges_batch in batched(bucket_ranges, _SQLITE_COMPOUND_SELECT_LIMIT):
+            result = await self._session.execute(_usage_bucket_rows_stmt(list(bucket_ranges_batch)))
+            rows.extend(
+                UsageModelBucketRow(
+                    bucket_key=row.bucket_key,
+                    bucket_label=row.bucket_label,
+                    model=row.model,
+                    requests=int(row.requests or 0),
+                    input_tokens=int(row.input_tokens or 0),
+                    output_tokens=int(row.output_tokens or 0),
+                    cached_input_tokens=int(row.cached_input_tokens or 0),
+                )
+                for row in result.all()
+            )
+        return rows
 
     async def count_active_accounts(
         self,
@@ -564,6 +645,92 @@ def _daily_rows_stmt(
         .group_by(day_ranges_cte.c.report_date)
         .order_by(day_ranges_cte.c.report_date)
     )
+
+
+def _usage_model_bucket_expr():
+    return func.coalesce(func.nullif(RequestLog.model, ""), literal(UNKNOWN_MODEL_BUCKET))
+
+
+def _usage_bucket_ranges_cte(bucket_ranges: list[tuple[str, str, datetime, datetime]]):
+    bucket_range_rows = [
+        select(
+            literal(bucket_key).label("bucket_key"),
+            literal(bucket_label).label("bucket_label"),
+            literal(bucket_start).label("bucket_start"),
+            literal(bucket_end).label("bucket_end"),
+        )
+        for bucket_key, bucket_label, bucket_start, bucket_end in bucket_ranges
+    ]
+    bucket_ranges_query = bucket_range_rows[0] if len(bucket_range_rows) == 1 else union_all(*bucket_range_rows)
+    return bucket_ranges_query.cte("usage_buckets")
+
+
+def _usage_bucket_rows_stmt(bucket_ranges: list[tuple[str, str, datetime, datetime]]):
+    model_bucket = _usage_model_bucket_expr()
+    output_tokens = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+    bucket_ranges_cte = _usage_bucket_ranges_cte(bucket_ranges)
+    # OUTER JOIN keeps buckets with no traffic so the series stays continuous.
+    return (
+        select(
+            bucket_ranges_cte.c.bucket_key,
+            bucket_ranges_cte.c.bucket_label,
+            model_bucket.label("model"),
+            func.count(RequestLog.id).label("requests"),
+            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+        )
+        .select_from(
+            bucket_ranges_cte.outerjoin(
+                RequestLog,
+                and_(
+                    RequestLog.requested_at >= bucket_ranges_cte.c.bucket_start,
+                    RequestLog.requested_at < bucket_ranges_cte.c.bucket_end,
+                    _normal_traffic_clause(),
+                ),
+            )
+        )
+        .group_by(bucket_ranges_cte.c.bucket_key, bucket_ranges_cte.c.bucket_label, model_bucket)
+        .order_by(bucket_ranges_cte.c.bucket_key, model_bucket)
+    )
+
+
+def build_usage_bucket_ranges(
+    start_date: date,
+    end_date: date,
+    timezone_info: ZoneInfo | timezone,
+    bucket: str,
+) -> list[tuple[str, str, datetime, datetime]]:
+    """Build (key, label, utc_start, utc_end) ranges for usage stats series."""
+    ranges: list[tuple[str, str, datetime, datetime]] = []
+    current_date = start_date
+    while current_date <= end_date:
+        next_date = current_date + timedelta(days=1)
+        if bucket == USAGE_BUCKET_HOUR:
+            for hour in range(24):
+                bucket_start = datetime.combine(current_date, time(hour), tzinfo=timezone_info)
+                bucket_end = datetime.combine(current_date, time(hour), tzinfo=timezone_info) + timedelta(hours=1)
+                ranges.append(
+                    (
+                        f"{current_date.isoformat()}T{hour:02d}",
+                        f"{hour:02d}:00",
+                        bucket_start.astimezone(timezone.utc).replace(tzinfo=None),
+                        bucket_end.astimezone(timezone.utc).replace(tzinfo=None),
+                    )
+                )
+        else:
+            day_start = datetime.combine(current_date, datetime.min.time(), tzinfo=timezone_info)
+            next_day_start = datetime.combine(next_date, datetime.min.time(), tzinfo=timezone_info)
+            ranges.append(
+                (
+                    current_date.isoformat(),
+                    current_date.isoformat()[5:],
+                    day_start.astimezone(timezone.utc).replace(tzinfo=None),
+                    next_day_start.astimezone(timezone.utc).replace(tzinfo=None),
+                )
+            )
+        current_date = next_date
+    return ranges
 
 
 def _daily_bucket_ranges(

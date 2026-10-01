@@ -20,6 +20,7 @@ import { RequestFilters } from "@/features/dashboard/components/filters/request-
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 import { StatsGrid } from "@/features/dashboard/components/stats-grid";
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
+import { UsageStatsPanel } from "@/features/dashboard/components/usage-stats-panel";
 import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-credits-pace-card";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
@@ -337,6 +338,8 @@ export function DashboardPage() {
               safeLineSecondary={view.safeLineSecondary}
             />
           )}
+
+          <UsageStatsPanel />
 
           <section className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -12,7 +12,7 @@ from app.core.auth.dependencies import (
 from app.core.exceptions import DashboardBadRequestError
 from app.dependencies import ReportsContext, get_reports_context
 from app.modules.reports.repository import DailyReportRangeTooLargeError
-from app.modules.reports.schemas import ReportsResponse
+from app.modules.reports.schemas import ReportsResponse, UsageStatsResponse
 from app.modules.reports.service import InvalidReportDateRangeError
 
 router = APIRouter(
@@ -45,3 +45,15 @@ async def get_reports(
         raise DashboardBadRequestError(str(exc), code="invalid_report_date_range") from exc
     except DailyReportRangeTooLargeError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/usage-stats", response_model=UsageStatsResponse)
+async def get_usage_stats(
+    context: ReportsContext = Depends(get_reports_context),
+    range: Annotated[Literal["today", "7d", "30d"], Query()] = "7d",
+    report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
+) -> UsageStatsResponse:
+    return await context.service.get_usage_stats(
+        range_key=range,
+        report_timezone=report_timezone,
+    )

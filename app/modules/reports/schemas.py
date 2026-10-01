@@ -72,3 +72,41 @@ class ReportsResponse(DashboardModel):
     by_model: list[ModelCostEntry] = Field(default_factory=list)
     by_account: list[AccountCostEntry] = Field(default_factory=list)
     by_useragent: list[UserAgentCostEntry] = Field(default_factory=list)
+
+
+class UsageStatsSummary(DashboardModel):
+    total_tokens: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cached_tokens: int
+    total_requests: int
+    total_errors: int
+    model_count: int
+    avg_tokens_per_day: float
+
+
+class UsageModelEntry(DashboardModel):
+    model: str
+    requests: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    total_tokens: int
+    percentage: float
+
+
+class UsageSeriesBucket(DashboardModel):
+    bucket: str
+    label: str
+    values: dict[str, int]
+
+
+class UsageStatsResponse(DashboardModel):
+    range: str
+    bucket: str
+    timezone: str
+    start_date: str
+    end_date: str
+    summary: UsageStatsSummary
+    by_model: list[UsageModelEntry] = Field(default_factory=list)
+    series: list[UsageSeriesBucket] = Field(default_factory=list)

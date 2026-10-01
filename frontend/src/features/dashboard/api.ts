@@ -6,11 +6,14 @@ import {
   DashboardProjectionsSchema,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
+  UsageStatsResponseSchema,
   type OverviewTimeframe,
+  type UsageStatsRange,
 } from "@/features/dashboard/schemas";
 
 const DASHBOARD_PATH = "/api/dashboard";
 const REQUEST_LOGS_PATH = "/api/request-logs";
+const REPORTS_PATH = "/api/reports";
 
 export type RequestLogsListFilters = {
   limit?: number;
@@ -84,6 +87,20 @@ export function getRequestLogs(params: RequestLogsListFilters = {}) {
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   return get(`${REQUEST_LOGS_PATH}${suffix}`, RequestLogsResponseSchema);
+}
+
+export type UsageStatsParams = {
+  range?: UsageStatsRange;
+  timezone?: string;
+};
+
+export function getUsageStats(params: UsageStatsParams = {}) {
+  const query = new URLSearchParams();
+  query.set("range", params.range ?? "7d");
+  if (params.timezone) {
+    query.set("timezone", params.timezone);
+  }
+  return get(`${REPORTS_PATH}/usage-stats?${query.toString()}`, UsageStatsResponseSchema);
 }
 
 export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {

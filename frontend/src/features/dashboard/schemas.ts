@@ -257,3 +257,55 @@ export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSche
 export type FilterState = z.infer<typeof FilterStateSchema>;
 export type Depletion = z.infer<typeof DepletionSchema>;
 export type ServerWeeklyCreditPace = z.infer<typeof WeeklyCreditPaceSchema>;
+
+export const UsageStatsRangeSchema = z.enum(["today", "7d", "30d"]);
+export type UsageStatsRange = z.infer<typeof UsageStatsRangeSchema>;
+export const DEFAULT_USAGE_STATS_RANGE: UsageStatsRange = "today";
+
+export function parseUsageStatsRange(value: string | null | undefined): UsageStatsRange {
+  const parsed = UsageStatsRangeSchema.safeParse(value);
+  return parsed.success ? parsed.data : DEFAULT_USAGE_STATS_RANGE;
+}
+
+const UsageStatsSummarySchema = z.object({
+  totalTokens: z.number(),
+  totalInputTokens: z.number(),
+  totalOutputTokens: z.number(),
+  totalCachedTokens: z.number(),
+  totalRequests: z.number(),
+  totalErrors: z.number(),
+  modelCount: z.number(),
+  avgTokensPerDay: z.number(),
+});
+
+const UsageModelEntrySchema = z.object({
+  model: z.string(),
+  requests: z.number(),
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  cachedInputTokens: z.number(),
+  totalTokens: z.number(),
+  percentage: z.number(),
+});
+
+const UsageSeriesBucketSchema = z.object({
+  bucket: z.string(),
+  label: z.string(),
+  values: z.record(z.string(), z.number()),
+});
+
+export const UsageStatsResponseSchema = z.object({
+  range: UsageStatsRangeSchema,
+  bucket: z.enum(["hour", "day"]),
+  timezone: z.string(),
+  startDate: z.string(),
+  endDate: z.string(),
+  summary: UsageStatsSummarySchema,
+  byModel: z.array(UsageModelEntrySchema),
+  series: z.array(UsageSeriesBucketSchema),
+});
+
+export type UsageStatsSummary = z.infer<typeof UsageStatsSummarySchema>;
+export type UsageModelEntry = z.infer<typeof UsageModelEntrySchema>;
+export type UsageSeriesBucket = z.infer<typeof UsageSeriesBucketSchema>;
+export type UsageStatsResponse = z.infer<typeof UsageStatsResponseSchema>;

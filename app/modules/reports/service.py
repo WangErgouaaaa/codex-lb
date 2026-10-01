@@ -4,7 +4,15 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.utils.time import to_utc_naive, utcnow
-from app.modules.reports.repository import MAX_DAILY_REPORT_DAYS, DailyReportRangeTooLargeError, ReportsRepository
+from app.modules.reports.repository import (
+    MAX_DAILY_REPORT_DAYS,
+    UNKNOWN_MODEL_BUCKET,
+    USAGE_BUCKET_DAY,
+    USAGE_BUCKET_HOUR,
+    DailyReportRangeTooLargeError,
+    ReportsRepository,
+    build_usage_bucket_ranges,
+)
 from app.modules.reports.schemas import (
     AccountCostEntry,
     DailyReportRow,
@@ -13,12 +21,19 @@ from app.modules.reports.schemas import (
     ReportComparisonPrevious,
     ReportsResponse,
     ReportSummary,
+    UsageModelEntry,
+    UsageSeriesBucket,
+    UsageStatsResponse,
+    UsageStatsSummary,
     UserAgentCostEntry,
 )
 
 
 class InvalidReportDateRangeError(ValueError):
     """Raised when a report starts after it ends."""
+
+
+USAGE_STATS_RANGES = ("today", "7d", "30d")
 
 
 class ReportsService:
@@ -152,6 +167,90 @@ class ReportsService:
                 )
                 for u in by_useragent
             ],
+        )
+
+    async def get_usage_stats(
+        self,
+        range_key: str = "7d",
+        report_timezone: str | None = None,
+    ) -> UsageStatsResponse:
+        if range_key not in USAGE_STATS_RANGES:
+            raise ValueError(f"range must be one of {', '.join(USAGE_STATS_RANGES)}")
+
+        timezone_info = _resolve_timezone(report_timezone)
+        now = utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info)
+        today = now.date()
+        if range_key == "today":
+            start_date = today
+            end_date = today
+            bucket = USAGE_BUCKET_HOUR
+        elif range_key == "30d":
+            start_date = today - timedelta(days=29)
+            end_date = today
+            bucket = USAGE_BUCKET_DAY
+        else:
+            start_date = today - timedelta(days=6)
+            end_date = today
+            bucket = USAGE_BUCKET_DAY
+
+        start_at = _local_midnight_to_utc_naive(start_date, timezone_info)
+        end_at = _local_midnight_to_utc_naive(end_date + timedelta(days=1), timezone_info)
+
+        summary = await self._repository.aggregate_summary(start_at, end_at)
+        model_rows = await self._repository.aggregate_usage_by_model(start_at, end_at)
+        bucket_ranges = build_usage_bucket_ranges(start_date, end_date, timezone_info, bucket)
+        series_rows = await self._repository.aggregate_usage_by_model_bucket(bucket_ranges)
+
+        total_tokens = summary.total_input_tokens + summary.total_output_tokens + summary.total_cached_tokens
+        by_model = [
+            UsageModelEntry(
+                model=row.model,
+                requests=row.requests,
+                input_tokens=row.input_tokens,
+                output_tokens=row.output_tokens,
+                cached_input_tokens=row.cached_input_tokens,
+                total_tokens=row.input_tokens + row.output_tokens + row.cached_input_tokens,
+                percentage=round(
+                    (row.input_tokens + row.output_tokens + row.cached_input_tokens) / total_tokens * 100,
+                    1,
+                )
+                if total_tokens > 0
+                else 0.0,
+            )
+            for row in model_rows
+        ]
+
+        values_by_bucket: dict[str, dict[str, int]] = {}
+        for row in series_rows:
+            if row.requests == 0 and row.model == UNKNOWN_MODEL_BUCKET:
+                continue
+            bucket_values = values_by_bucket.setdefault(row.bucket_key, {})
+            bucket_values[row.model] = row.input_tokens + row.output_tokens + row.cached_input_tokens
+
+        series = [
+            UsageSeriesBucket(bucket=bucket_key, label=bucket_label, values=values_by_bucket.get(bucket_key, {}))
+            for bucket_key, bucket_label, _bucket_start, _bucket_end in bucket_ranges
+        ]
+
+        window_days = (end_date - start_date).days + 1
+        return UsageStatsResponse(
+            range=range_key,
+            bucket=bucket,
+            timezone=str(timezone_info),
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+            summary=UsageStatsSummary(
+                total_tokens=total_tokens,
+                total_input_tokens=summary.total_input_tokens,
+                total_output_tokens=summary.total_output_tokens,
+                total_cached_tokens=summary.total_cached_tokens,
+                total_requests=summary.total_requests,
+                total_errors=summary.total_errors,
+                model_count=len(by_model),
+                avg_tokens_per_day=round(total_tokens / window_days, 1) if total_tokens > 0 else 0.0,
+            ),
+            by_model=by_model,
+            series=series,
         )
 
 

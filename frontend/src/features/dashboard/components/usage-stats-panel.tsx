@@ -107,6 +107,9 @@ export function UsageStatsPanel() {
       ? Math.round((data.summary.attributedRequests / data.summary.totalRequests) * 100)
       : null;
 
+  const cacheHitRate = (cached: number, input: number): number | null =>
+    input > 0 ? Math.min(100, Math.round((cached / input) * 100)) : null;
+
   return (
     <div className="rounded-xl border bg-card p-5" data-testid="usage-stats-panel">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -357,7 +360,10 @@ export function UsageStatsPanel() {
                         <td className="py-2.5 pr-4 text-right text-foreground">{formatNumber(entry.requests)}</td>
                         <td className="py-2.5 pr-4 text-right text-foreground">{formatCompactNumber(entry.inputTokens)}</td>
                         <td className="py-2.5 pr-4 text-right text-foreground">{formatCompactNumber(entry.outputTokens)}</td>
-                        <td className="py-2.5 pr-4 text-right text-muted-foreground">{formatCompactNumber(entry.cachedInputTokens)}</td>
+                        <td className="py-2.5 pr-4 text-right text-muted-foreground">
+                          <span>{formatCompactNumber(entry.cachedInputTokens)}</span>{" "}
+                          <CachedRate rate={cacheHitRate(entry.cachedInputTokens, entry.inputTokens)} />
+                        </td>
                         <td className="py-2.5 pr-4 text-right font-medium text-foreground">{formatCompactNumber(entry.totalTokens)}</td>
                         <td className="py-2.5 pr-4 text-right font-medium text-foreground">
                           {entry.credits > 0 ? formatCompactNumber(entry.credits) : "—"}
@@ -375,7 +381,10 @@ export function UsageStatsPanel() {
                       <td className="py-2.5 pr-4 text-right font-medium text-foreground">{formatNumber(data.summary.totalRequests)}</td>
                       <td className="py-2.5 pr-4 text-right font-medium text-foreground">{formatCompactNumber(data.summary.totalInputTokens)}</td>
                       <td className="py-2.5 pr-4 text-right font-medium text-foreground">{formatCompactNumber(data.summary.totalOutputTokens)}</td>
-                      <td className="py-2.5 pr-4 text-right font-medium text-foreground">{formatCompactNumber(data.summary.totalCachedTokens)}</td>
+                      <td className="py-2.5 pr-4 text-right font-medium text-foreground">
+                        <span>{formatCompactNumber(data.summary.totalCachedTokens)}</span>{" "}
+                        <CachedRate rate={cacheHitRate(data.summary.totalCachedTokens, data.summary.totalInputTokens)} />
+                      </td>
                       <td className="py-2.5 pr-4 text-right font-medium text-foreground">{formatCompactNumber(data.summary.totalTokens)}</td>
                       <td className="py-2.5 pr-4 text-right font-medium text-foreground">
                         {data.summary.totalCredits > 0 ? formatCompactNumber(data.summary.totalCredits) : "—"}
@@ -404,4 +413,11 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
       {sub ? <div className="text-[11px] text-muted-foreground">{sub}</div> : null}
     </div>
   );
+}
+
+function CachedRate({ rate }: { rate: number | null }) {
+  if (rate === null) {
+    return null;
+  }
+  return <span className="text-[11px] text-muted-foreground">({rate}%)</span>;
 }

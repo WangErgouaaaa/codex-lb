@@ -129,6 +129,10 @@ describe("UsageStatsPanel", () => {
     expect(screen.getByTestId("usage-stats-row-gpt-sol")).toBeInTheDocument();
     expect(screen.getByText("87.5%")).toBeInTheDocument();
 
+    // Cached column carries the per-model cache hit rate (cached / input).
+    expect(screen.getByTestId("usage-stats-row-gpt-astra").textContent).toContain("(3%)");
+    expect(screen.getByTestId("usage-stats-row-gpt-sol").textContent).toContain("(5%)");
+
     // Chart rows keep bucket labels and per-model values for stacking.
     expect(capturedChartProps?.data).toEqual([
       { label: "09:00", "gpt-astra": 500_000, "gpt-sol": 100_000 },

@@ -544,6 +544,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 request_id=request_id,
                 surface="stream",
                 concurrency_caps=concurrency_caps or _facade().effective_account_concurrency_caps(),
+                plan_type=account.plan_type,
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
             attempt_started_at = time.monotonic()

@@ -1444,6 +1444,7 @@ class _WebSocketMixin:
                                 request_id=request_state.request_log_id or request_state.request_id,
                                 surface="websocket",
                                 concurrency_caps=effective_account_concurrency_caps(current_settings),
+                                plan_type=account.plan_type,
                             )
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease

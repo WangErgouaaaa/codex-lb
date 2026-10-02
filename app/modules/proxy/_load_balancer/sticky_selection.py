@@ -103,6 +103,7 @@ class StickySelectionOwner(Protocol):
         kind: AccountLeaseKind,
         caps: AccountConcurrencyCaps,
         stream_reserve_slots: int = 0,
+        plan_type: str | None = None,
     ) -> bool: ...
 
     def _acquire_account_lease_locked(
@@ -543,9 +544,10 @@ async def run_sticky_selection_path(
                     kind=lease_kind,
                     caps=caps,
                     stream_reserve_slots=stream_reserve_slots,
+                    plan_type=selected.plan_type,
                 ):
                     selection_error_code = _account_cap_error_code(lease_kind)
-                    error_message = _account_cap_error_message(lease_kind, caps)
+                    error_message = _account_cap_error_message(lease_kind, caps, plan_type=selected.plan_type)
                 else:
                     selection_admitted = True
                     if lease_kind is not None:
@@ -1157,14 +1159,13 @@ def _filter_states_for_account_caps(
         return list(states)
     filtered: list[AccountState] = []
     for state in states:
+        state_response_create_limit, state_stream_limit = caps.caps_for_plan(state.plan_type)
         if lease_kind == "response_create":
-            cap = caps.response_create_limit
-            if cap > 0 and state.inflight_response_creates >= cap:
+            if state_response_create_limit > 0 and state.inflight_response_creates >= state_response_create_limit:
                 continue
         else:
-            cap = caps.stream_limit
-            effective_cap = max(1, cap - max(0, stream_reserve_slots))
-            if cap > 0 and state.inflight_streams >= effective_cap:
+            effective_cap = max(1, state_stream_limit - max(0, stream_reserve_slots))
+            if state_stream_limit > 0 and state.inflight_streams >= effective_cap:
                 continue
         filtered.append(state)
     return filtered
@@ -1233,8 +1234,22 @@ def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
     return None
 
 
-def _account_cap_error_message(lease_kind: AccountLeaseKind | None, caps: AccountConcurrencyCaps) -> str:
+def _account_cap_error_message(
+    lease_kind: AccountLeaseKind | None,
+    caps: AccountConcurrencyCaps,
+    plan_type: str | None = None,
+) -> str:
+    effective_response_create_limit, effective_stream_limit = caps.caps_for_plan(plan_type)
+    plan_overridden = (effective_response_create_limit, effective_stream_limit) != (
+        caps.response_create_limit,
+        caps.stream_limit,
+    )
     if lease_kind == "response_create":
+        if plan_overridden:
+            return (
+                f"Account response-create capacity is exhausted; per-account limit is "
+                f"{effective_response_create_limit}"
+            )
         cap = caps.response_create_limit
         if caps.replica_count > 1 and caps.configured_response_create_limit is not None:
             return (
@@ -1244,6 +1259,11 @@ def _account_cap_error_message(lease_kind: AccountLeaseKind | None, caps: Accoun
             )
         return f"Account response-create capacity is exhausted; per-account limit is {cap}"
     if lease_kind == "stream":
+        if plan_overridden:
+            return (
+                f"Account stream capacity is exhausted; per-account limit is {effective_stream_limit}. "
+                "Increase the dashboard stream limit or wait for active streams to finish."
+            )
         cap = caps.stream_limit
         if caps.replica_count > 1 and caps.configured_stream_limit is not None:
             return (

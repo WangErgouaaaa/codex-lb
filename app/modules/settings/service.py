@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.core.config.settings import get_settings
+from app.core.plan_caps import parse_plan_concurrency_caps, serialize_plan_concurrency_caps
 from app.modules.settings.repository import SettingsRepository
+from app.modules.settings.schemas import PlanCapPair
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
     get_additional_quota_definition,
@@ -63,6 +65,7 @@ class DashboardSettingsData:
     request_log_retention_override_days: int | None
     usage_history_retention_override_days: int | None
     version: int
+    proxy_account_plan_concurrency_caps: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +119,7 @@ class DashboardSettingsUpdateData:
     usage_history_retention_override_days: int | None
     clear_request_log_retention_override: bool
     clear_usage_history_retention_override: bool
+    proxy_account_plan_concurrency_caps: dict[str, PlanCapPair] | None = None
 
 
 class SettingsService:
@@ -135,6 +139,9 @@ class SettingsService:
             proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
             proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
                 row.proxy_account_stream_recovery_reserve
+            ),
+            proxy_account_plan_concurrency_caps=parse_plan_concurrency_caps(
+                row.proxy_account_plan_concurrency_caps_json
             ),
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
@@ -203,6 +210,9 @@ class SettingsService:
             proxy_account_response_create_limit=payload.proxy_account_response_create_limit,
             proxy_account_stream_limit=payload.proxy_account_stream_limit,
             proxy_account_stream_recovery_reserve=payload.proxy_account_stream_recovery_reserve,
+            proxy_account_plan_concurrency_caps_json=_dump_plan_concurrency_caps(
+                payload.proxy_account_plan_concurrency_caps
+            ),
             upstream_proxy_routing_enabled=payload.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=payload.upstream_proxy_default_pool_id,
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
@@ -259,6 +269,9 @@ class SettingsService:
             proxy_account_stream_limit=_effective_stream_limit(row.proxy_account_stream_limit),
             proxy_account_stream_recovery_reserve=_effective_stream_recovery_reserve(
                 row.proxy_account_stream_recovery_reserve
+            ),
+            proxy_account_plan_concurrency_caps=parse_plan_concurrency_caps(
+                row.proxy_account_plan_concurrency_caps_json
             ),
             upstream_proxy_routing_enabled=row.upstream_proxy_routing_enabled,
             upstream_proxy_default_pool_id=row.upstream_proxy_default_pool_id,
@@ -323,6 +336,12 @@ def _effective_stream_limit(value: int | None) -> int:
 
 def _effective_stream_recovery_reserve(value: int | None) -> int:
     return get_settings().proxy_account_stream_recovery_reserve if value is None else value
+
+
+def _dump_plan_concurrency_caps(caps: dict[str, PlanCapPair] | None) -> str | None:
+    if caps is None:
+        return None
+    return serialize_plan_concurrency_caps({plan: pair.model_dump(by_alias=True) for plan, pair in caps.items()})
 
 
 def _effective_request_log_retention(value: int | None) -> int:

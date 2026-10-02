@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Mapping
+
+from app.core.plan_types import normalize_account_plan_type
 
 AccountLeaseKind = Literal["response_create", "stream"]
 
@@ -51,3 +53,16 @@ class AccountConcurrencyCaps:
     configured_response_create_limit: int | None = None
     configured_stream_limit: int | None = None
     replica_count: int = 1
+    # Normalized plan -> (response_create_limit, stream_limit); ``None`` (never
+    # an empty dict) means no overrides are configured.
+    plan_overrides: Mapping[str, tuple[int, int]] | None = None
+
+    def caps_for_plan(self, plan_type: str | None) -> tuple[int, int]:
+        """Resolve this account's caps: exact normalized plan match, else the global caps."""
+        if self.plan_overrides:
+            normalized = normalize_account_plan_type(plan_type)
+            if normalized is not None:
+                override = self.plan_overrides.get(normalized)
+                if override is not None:
+                    return (override[0], override[1])
+        return (self.response_create_limit, self.stream_limit)

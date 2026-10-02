@@ -31,6 +31,11 @@ class AdditionalQuotaPolicy(DashboardModel):
     model_ids: list[str] = Field(default_factory=list)
 
 
+class PlanCapPair(DashboardModel):
+    response_create: int = Field(ge=0)
+    stream: int = Field(ge=0)
+
+
 class DashboardSettingsResponse(DashboardModel):
     sticky_threads_enabled: bool
     upstream_stream_transport: str = Field(pattern=r"^(default|auto|http|websocket)$")
@@ -39,6 +44,7 @@ class DashboardSettingsResponse(DashboardModel):
     proxy_account_response_create_limit: int = Field(ge=0)
     proxy_account_stream_limit: int = Field(ge=0)
     proxy_account_stream_recovery_reserve: int = Field(ge=0)
+    proxy_account_plan_concurrency_caps: dict[str, PlanCapPair] = Field(default_factory=dict)
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool
@@ -102,6 +108,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     proxy_account_response_create_limit: int | None = Field(default=None, ge=0)
     proxy_account_stream_limit: int | None = Field(default=None, ge=0)
     proxy_account_stream_recovery_reserve: int | None = Field(default=None, ge=0)
+    proxy_account_plan_concurrency_caps: dict[str, PlanCapPair] | None = None
     upstream_proxy_routing_enabled: bool | None = None
     upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool | None = None

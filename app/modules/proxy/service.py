@@ -1268,6 +1268,7 @@ class ProxyService(
         bridge_session: "_HTTPBridgeSession | None" = None,
         compact: bool = False,
         account_id: str | None = None,
+        plan_type: str | None = None,
         surface: str = "websocket",
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
@@ -1282,6 +1283,7 @@ class ProxyService(
                 request_id=request_state.request_id,
                 surface=surface,
                 concurrency_caps=effective_account_concurrency_caps(settings),
+                plan_type=plan_type,
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
@@ -2005,11 +2007,13 @@ class ProxyService(
         request_id: str,
         surface: str,
         concurrency_caps: AccountConcurrencyCaps,
+        plan_type: str | None = None,
     ) -> AccountLease:
         lease = await self._load_balancer.acquire_account_lease(
             account_id,
             kind="response_create",
             concurrency_caps=concurrency_caps,
+            plan_type=plan_type,
         )
         if lease is not None:
             return lease

@@ -102,7 +102,13 @@ class _CompactServiceProtocol(Protocol):
     ) -> str | None: ...
 
     async def _acquire_account_response_create_lease_or_overload(
-        self, *, account_id: str, request_id: str, surface: str, concurrency_caps: AccountConcurrencyCaps
+        self,
+        *,
+        account_id: str,
+        request_id: str,
+        surface: str,
+        concurrency_caps: AccountConcurrencyCaps,
+        plan_type: str | None = None,
     ) -> AccountLease: ...
 
     async def _resolve_upstream_route_for_account(
@@ -723,6 +729,7 @@ class _CompactMixin:
                             request_id=request_id,
                             surface="compact",
                             concurrency_caps=concurrency_caps,
+                            plan_type=target.plan_type,
                         )
                     create_lease = await proxy._get_work_admission().acquire_response_create(compact=True)
                     route = await proxy._resolve_upstream_route_for_account(target, operation="compact")

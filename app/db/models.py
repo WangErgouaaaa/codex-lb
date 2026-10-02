@@ -842,6 +842,12 @@ class DashboardSettings(Base):
         Integer,
         nullable=True,
     )
+    proxy_account_plan_concurrency_caps_json: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+        server_default=text("'{}'"),
+        nullable=False,
+    )
     proxy_api_key_fair_share_congestion_threshold_pct: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,

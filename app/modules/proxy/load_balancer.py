@@ -49,6 +49,7 @@ from app.core.metrics.prometheus import (
     account_lease_stale_reclaimed_total,
 )
 from app.core.openai.model_registry import canonical_service_tier_value, get_model_registry
+from app.core.plan_caps import parse_plan_concurrency_caps
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
@@ -136,6 +137,11 @@ _SIBLING_FETCH_MARGIN_SECONDS = 5.0
 _UsageWindowEntry = UsageHistory | AdditionalUsageHistory
 
 _ACCOUNT_STREAM_LEASE_STALE_GRACE_SECONDS = 60.0
+
+# Partitioned replicas split the global caps deterministically; per-plan caps
+# cannot be split the same way without a shared coordinator, so they are
+# skipped there and the skip is reported once per process.
+_PLAN_CAPS_PARTITION_SKIP_WARNED = False
 
 _DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 
@@ -278,19 +284,19 @@ class LoadBalancer:
         kind: AccountLeaseKind,
         estimated_tokens: float = 0.0,
         concurrency_caps: AccountConcurrencyCaps | None = None,
+        plan_type: str | None = None,
     ) -> AccountLease | None:
         caps = concurrency_caps or effective_account_concurrency_caps()
+        response_create_limit, stream_limit = caps.caps_for_plan(plan_type)
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
             runtime = self._runtime.setdefault(account_id, RuntimeState())
             if kind == "response_create":
-                cap = caps.response_create_limit
-                if cap > 0 and runtime.inflight_response_creates >= cap:
+                if response_create_limit > 0 and runtime.inflight_response_creates >= response_create_limit:
                     _record_account_cap_rejection("response_create")
                     return None
             else:
-                cap = caps.stream_limit
-                if cap > 0 and runtime.inflight_streams >= cap:
+                if stream_limit > 0 and runtime.inflight_streams >= stream_limit:
                     _record_account_cap_rejection("stream")
                     return None
             return self._acquire_account_lease_locked(
@@ -344,14 +350,14 @@ class LoadBalancer:
         kind: AccountLeaseKind,
         caps: AccountConcurrencyCaps,
         stream_reserve_slots: int = 0,
+        plan_type: str | None = None,
     ) -> bool:
         runtime = self._runtime.setdefault(account_id, RuntimeState())
+        response_create_limit, stream_limit = caps.caps_for_plan(plan_type)
         if kind == "response_create":
-            cap = caps.response_create_limit
-            return cap <= 0 or runtime.inflight_response_creates < cap
-        cap = caps.stream_limit
-        effective_cap = max(1, cap - max(0, stream_reserve_slots))
-        return cap <= 0 or runtime.inflight_streams < effective_cap
+            return response_create_limit <= 0 or runtime.inflight_response_creates < response_create_limit
+        effective_cap = max(1, stream_limit - max(0, stream_reserve_slots))
+        return stream_limit <= 0 or runtime.inflight_streams < effective_cap
 
     def _release_account_lease_locked(self, lease: AccountLease, *, reason: str) -> bool:
         runtime = self._runtime.get(lease.account_id)
@@ -1860,9 +1866,17 @@ def _account_lease_stale_ttl_seconds(kind: AccountLeaseKind, settings: object) -
 
 
 def effective_account_concurrency_caps(dashboard_settings: object | None = None) -> AccountConcurrencyCaps:
+    """Resolve the per-account concurrency caps, including plan-scoped overrides.
+
+    ``dashboard_settings=None`` keeps meaning "startup defaults": it contributes
+    no plan overrides even when startup settings carry global cap values.
+    """
     startup_settings = get_settings()
     configured_response_create_limit, configured_stream_limit = configured_account_concurrency_caps(
         dashboard_settings, startup_settings=startup_settings
+    )
+    plan_overrides = parse_plan_concurrency_caps(
+        getattr(dashboard_settings, "proxy_account_plan_concurrency_caps_json", None)
     )
     scope = getattr(startup_settings, "proxy_account_caps_scope", "partitioned")
     partition = get_cap_partition()
@@ -1870,13 +1884,27 @@ def effective_account_concurrency_caps(dashboard_settings: object | None = None)
         return AccountConcurrencyCaps(
             response_create_limit=configured_response_create_limit,
             stream_limit=configured_stream_limit,
+            plan_overrides=plan_overrides or None,
         )
+    if plan_overrides:
+        _warn_plan_caps_skipped_in_partitioned_mode()
     return AccountConcurrencyCaps(
         response_create_limit=partition_cap(configured_response_create_limit, partition.replica_count, partition.rank),
         stream_limit=partition_cap(configured_stream_limit, partition.replica_count, partition.rank),
         configured_response_create_limit=configured_response_create_limit,
         configured_stream_limit=configured_stream_limit,
         replica_count=partition.replica_count,
+    )
+
+
+def _warn_plan_caps_skipped_in_partitioned_mode() -> None:
+    global _PLAN_CAPS_PARTITION_SKIP_WARNED
+    if _PLAN_CAPS_PARTITION_SKIP_WARNED:
+        return
+    _PLAN_CAPS_PARTITION_SKIP_WARNED = True
+    logger.warning(
+        "Plan-scoped account concurrency caps are ignored while caps are partitioned across replicas; "
+        "run with proxy_account_caps_scope='replica' to enforce per-plan caps"
     )
 
 

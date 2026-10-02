@@ -23,6 +23,7 @@ from app.core.clients.http import _build_ssl_context
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardSettingsConflictError
+from app.core.plan_caps import plan_cap_violating_reserve, serialize_plan_concurrency_caps
 from app.core.upstream_proxy import resolve_proxy_endpoint
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
@@ -38,6 +39,7 @@ from app.modules.settings.schemas import (
     AdditionalQuotaPolicy,
     DashboardSettingsResponse,
     DashboardSettingsUpdateRequest,
+    PlanCapPair,
     RuntimeConnectAddressResponse,
     UpstreamProxyAdminResponse,
     UpstreamProxyEndpointCreateRequest,
@@ -130,6 +132,10 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         proxy_account_response_create_limit=settings.proxy_account_response_create_limit,
         proxy_account_stream_limit=settings.proxy_account_stream_limit,
         proxy_account_stream_recovery_reserve=settings.proxy_account_stream_recovery_reserve,
+        proxy_account_plan_concurrency_caps={
+            plan: PlanCapPair(response_create=response_create, stream=stream)
+            for plan, (response_create, stream) in settings.proxy_account_plan_concurrency_caps.items()
+        },
         upstream_proxy_routing_enabled=settings.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
@@ -613,12 +619,42 @@ async def update_settings(
             {
                 "proxy_account_stream_limit",
                 "proxy_account_stream_recovery_reserve",
+                "proxy_account_plan_concurrency_caps",
             }
             & payload.model_fields_set
         )
         if cap_fields_changed and stream_limit > 0 and stream_recovery_reserve > stream_limit:
             raise DashboardBadRequestError(
                 "proxyAccountStreamRecoveryReserve must not exceed proxyAccountStreamLimit",
+                code="invalid_proxy_account_stream_recovery_reserve",
+            )
+        payload_plan_caps = (
+            payload.proxy_account_plan_concurrency_caps
+            if "proxy_account_plan_concurrency_caps" in payload.model_fields_set
+            else None
+        )
+        if payload_plan_caps is not None:
+            merged_plan_caps = payload_plan_caps
+        else:
+            merged_plan_caps = {
+                plan: PlanCapPair(response_create=response_create, stream=stream)
+                for plan, (response_create, stream) in current.proxy_account_plan_concurrency_caps.items()
+            }
+        merged_plan_caps_payload = {plan: pair.model_dump(by_alias=True) for plan, pair in merged_plan_caps.items()}
+        try:
+            serialize_plan_concurrency_caps(merged_plan_caps_payload)
+        except ValueError as exc:
+            raise DashboardBadRequestError(str(exc), code="invalid_proxy_account_plan_concurrency_caps") from exc
+        violating_plan = plan_cap_violating_reserve(
+            {
+                plan: (int(entry["responseCreate"]), int(entry["stream"]))
+                for plan, entry in merged_plan_caps_payload.items()
+            },
+            stream_recovery_reserve,
+        )
+        if violating_plan is not None:
+            raise DashboardBadRequestError(
+                f"proxyAccountStreamRecoveryReserve must not exceed the stream cap for plan {violating_plan}",
                 code="invalid_proxy_account_stream_recovery_reserve",
             )
         updated = await context.service.update_settings(
@@ -650,6 +686,7 @@ async def update_settings(
                     if "proxy_account_stream_recovery_reserve" in payload.model_fields_set
                     else None
                 ),
+                proxy_account_plan_concurrency_caps=payload_plan_caps,
                 upstream_proxy_routing_enabled=(
                     payload.upstream_proxy_routing_enabled
                     if payload.upstream_proxy_routing_enabled is not None
@@ -842,6 +879,7 @@ async def update_settings(
             "proxy_account_response_create_limit",
             "proxy_account_stream_limit",
             "proxy_account_stream_recovery_reserve",
+            "proxy_account_plan_concurrency_caps",
             "upstream_proxy_routing_enabled",
             "upstream_proxy_default_pool_id",
             "prefer_earlier_reset_accounts",

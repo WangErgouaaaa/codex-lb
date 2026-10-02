@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import cast
 
 import pytest
@@ -8,7 +9,9 @@ import pytest
 import app.modules.settings.service as settings_service_module
 from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
+from app.modules.settings.schemas import PlanCapPair
 from app.modules.settings.service import (
+    DashboardSettingsUpdateData,
     SettingsService,
     _dump_additional_quota_routing_policies,
     _parse_additional_quota_routing_policies,
@@ -128,3 +131,145 @@ def test_dump_additional_quota_routing_policies_canonicalizes_keys_and_filters_i
         }
     )
     assert json.loads(dumped) == {"codex_spark": "burn_first"}
+
+
+def _patch_startup_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: type(
+            "_StartupSettings",
+            (),
+            {
+                "proxy_account_response_create_limit": 24,
+                "proxy_account_stream_limit": 32,
+                "proxy_account_stream_recovery_reserve": 4,
+                "request_log_retention_days": 0,
+                "usage_history_retention_days": 0,
+            },
+        )(),
+    )
+
+
+def _update_data(**overrides: object) -> DashboardSettingsUpdateData:
+    values: dict[str, object] = {
+        "sticky_threads_enabled": True,
+        "upstream_stream_transport": "default",
+        "prohibit_fast_mode": False,
+        "http_downstream_transport_policy": "smart",
+        "proxy_account_response_create_limit": None,
+        "proxy_account_stream_limit": None,
+        "proxy_account_stream_recovery_reserve": None,
+        "upstream_proxy_routing_enabled": False,
+        "upstream_proxy_default_pool_id": None,
+        "prefer_earlier_reset_accounts": True,
+        "prefer_earlier_reset_window": "secondary",
+        "show_reset_credit_badges": True,
+        "auto_redeem_reset_credits_before_expiry": False,
+        "show_reset_credit_expiry_badge": True,
+        "routing_strategy": "capacity_weighted",
+        "relative_availability_power": 2.0,
+        "relative_availability_top_k": 5,
+        "single_account_id": None,
+        "openai_cache_affinity_max_age_seconds": 1800,
+        "dashboard_session_ttl_seconds": 31536000,
+        "http_responses_session_bridge_prompt_cache_idle_ttl_seconds": 3600,
+        "http_responses_session_bridge_gateway_safe_mode": False,
+        "sticky_reallocation_budget_threshold_pct": 95.0,
+        "sticky_reallocation_primary_budget_threshold_pct": 95.0,
+        "sticky_reallocation_secondary_budget_threshold_pct": 100.0,
+        "additional_quota_routing_policies": {},
+        "warmup_model": "auto",
+        "import_without_overwrite": True,
+        "totp_required_on_login": False,
+        "api_key_auth_enabled": False,
+        "hide_upstream_quota_from_api_keys": False,
+        "limit_warmup_enabled": False,
+        "limit_warmup_windows": "both",
+        "limit_warmup_model": "auto",
+        "limit_warmup_prompt": "Say OK.",
+        "limit_warmup_cooldown_seconds": 3600,
+        "limit_warmup_exhausted_threshold_percent": 99.0,
+        "limit_warmup_idle_threshold_percent": 1.0,
+        "limit_warmup_min_available_percent": 100.0,
+        "weekly_pace_working_days": "0,1,2,3,4,5,6",
+        "weekly_pace_smoothing_minutes": 30,
+        "guest_access_enabled": False,
+        "limit_warmup_staggered_idle_enabled": False,
+        "request_log_retention_override_days": None,
+        "usage_history_retention_override_days": None,
+        "clear_request_log_retention_override": False,
+        "clear_usage_history_retention_override": False,
+        "proxy_account_plan_concurrency_caps": None,
+    }
+    values.update(overrides)
+    return DashboardSettingsUpdateData(**values)
+
+
+@pytest.mark.asyncio
+async def test_plan_concurrency_caps_row_json_parses_into_settings_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = DashboardSettings()
+    row.proxy_account_plan_concurrency_caps_json = json.dumps(
+        {"plus": {"responseCreate": 4, "stream": 6}, "pro": {"responseCreate": 8, "stream": 12}}
+    )
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    _patch_startup_settings(monkeypatch)
+
+    settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+
+    assert settings.proxy_account_plan_concurrency_caps == {"plus": (4, 6), "pro": (8, 12)}
+
+    # Malformed row JSON degrades to the global caps instead of failing reads.
+    row.proxy_account_plan_concurrency_caps_json = "not-json"
+    settings = await SettingsService(cast(SettingsRepository, _Repository())).get_settings()
+    assert settings.proxy_account_plan_concurrency_caps == {}
+
+
+@pytest.mark.asyncio
+async def test_plan_concurrency_caps_update_serializes_and_round_trips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = DashboardSettings()
+    captured: dict[str, object] = {}
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+        async def update(self, **kwargs: object) -> DashboardSettings:
+            captured.update(kwargs)
+            plan_caps_json = kwargs["proxy_account_plan_concurrency_caps_json"]
+            if plan_caps_json is not None:
+                row.proxy_account_plan_concurrency_caps_json = str(plan_caps_json)
+            return row
+
+        async def commit_refresh(
+            self,
+            settings: DashboardSettings,
+            *,
+            on_committed: Callable[[], None] | None = None,
+        ) -> None:
+            return None
+
+    _patch_startup_settings(monkeypatch)
+    service = SettingsService(cast(SettingsRepository, _Repository()))
+
+    settings = await service.update_settings(
+        _update_data(proxy_account_plan_concurrency_caps={"plus": PlanCapPair(response_create=4, stream=6)})
+    )
+
+    assert captured["proxy_account_plan_concurrency_caps_json"] == '{"plus":{"responseCreate":4,"stream":6}}'
+    # The returned dataclass re-parses the persisted column JSON.
+    assert settings.proxy_account_plan_concurrency_caps == {"plus": (4, 6)}
+
+    # An absent field passes None through: the column stays untouched.
+    captured.clear()
+    settings = await service.update_settings(_update_data())
+    assert captured["proxy_account_plan_concurrency_caps_json"] is None
+    assert settings.proxy_account_plan_concurrency_caps == {"plus": (4, 6)}

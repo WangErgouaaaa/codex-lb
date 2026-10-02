@@ -1207,3 +1207,80 @@ async def test_retention_override_tri_state_echo_capture_and_clear(async_client,
         settings = await session.get(DashboardSettings, 1)
         assert settings is not None
         assert settings.request_log_retention_days is None
+
+
+@pytest.mark.asyncio
+async def test_settings_api_plan_concurrency_caps_default_write_and_read_back(async_client):
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["proxyAccountPlanConcurrencyCaps"] == {}
+
+    caps = {
+        "plus": {"responseCreate": 4, "stream": 6},
+        "pro": {"responseCreate": 8, "stream": 12},
+    }
+    response = await async_client.put("/api/settings", json={"proxyAccountPlanConcurrencyCaps": caps})
+    assert response.status_code == 200
+    assert response.json()["proxyAccountPlanConcurrencyCaps"] == caps
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["proxyAccountPlanConcurrencyCaps"] == caps
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        assert json.loads(settings.proxy_account_plan_concurrency_caps_json) == caps
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_unknown_plan_concurrency_cap_key(async_client):
+    response = await async_client.put(
+        "/api/settings",
+        json={
+            "proxyAccountPlanConcurrencyCaps": {
+                "nope": {"responseCreate": 4, "stream": 6},
+            }
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_proxy_account_plan_concurrency_caps"
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_plan_stream_cap_below_stream_recovery_reserve(async_client):
+    # The global reserve alone is unrestricted while no plan caps are configured.
+    response = await async_client.put("/api/settings", json={"proxyAccountStreamRecoveryReserve": 7})
+    assert response.status_code == 200
+
+    # Changing only the plan caps must still trigger the reserve validation.
+    response = await async_client.put(
+        "/api/settings",
+        json={"proxyAccountPlanConcurrencyCaps": {"plus": {"responseCreate": 4, "stream": 6}}},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_proxy_account_stream_recovery_reserve"
+
+    # A plan stream cap at or above the reserve is accepted.
+    response = await async_client.put(
+        "/api/settings",
+        json={"proxyAccountPlanConcurrencyCaps": {"plus": {"responseCreate": 4, "stream": 7}}},
+    )
+    assert response.status_code == 200
+    assert response.json()["proxyAccountPlanConcurrencyCaps"] == {"plus": {"responseCreate": 4, "stream": 7}}
+
+
+@pytest.mark.asyncio
+async def test_settings_api_unrelated_update_preserves_plan_concurrency_caps(async_client):
+    caps = {"plus": {"responseCreate": 4, "stream": 6}}
+    response = await async_client.put("/api/settings", json={"proxyAccountPlanConcurrencyCaps": caps})
+    assert response.status_code == 200
+
+    response = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert response.status_code == 200
+    assert response.json()["proxyAccountPlanConcurrencyCaps"] == caps
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    assert response.json()["proxyAccountPlanConcurrencyCaps"] == caps

@@ -1519,6 +1519,36 @@ class LoadBalancer:
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)
 
+    async def mark_bio_policy_pause(self, account: Account, reason: str) -> bool:
+        """Pause *account* after a content-moderation flag burst.
+
+        Mirrors ``AccountsService.pause_account`` semantics: ``PAUSED`` with an
+        explanatory ``deactivation_reason`` and no cooldown deadline, expecting
+        a human to review and re-enable from the dashboard. Returns whether the
+        pause applied; an account already paused/reauthed/deactivated (or a row
+        concurrently changed by a peer replica, CAS miss) stays untouched.
+        """
+        lock = await self._get_account_lock(account.id)
+        async with lock:
+            state = self._state_for(account)
+            if state.status in (
+                AccountStatus.PAUSED,
+                AccountStatus.REAUTH_REQUIRED,
+                AccountStatus.DEACTIVATED,
+            ):
+                return False
+            state.status = AccountStatus.PAUSED
+            state.deactivation_reason = reason
+            state.reset_at = None
+            state.blocked_at = None
+            self._sync_runtime_state(account, state)
+            async with self._repo_factory() as repos:
+                paused = await self._persist_state_if_current(repos.accounts, account, state)
+            if paused:
+                mark_account_routing_unavailable(account.id)
+            self._selection_inputs_cache.invalidate()
+            return paused
+
     async def record_errors(self, account: Account, count: int) -> None:
         """Record *count* transient errors in a single lock acquisition."""
         if count < 1:

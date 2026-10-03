@@ -185,7 +185,9 @@ def _install_harness(
     monkeypatch.setattr(rejection_refresh_module, "get_background_session", fake_background_session)
     monkeypatch.setattr(rejection_refresh_module, "AccountsRepository", lambda session: stub_accounts)
     monkeypatch.setattr(rejection_refresh_module, "UsageRepository", lambda session: stub_usage)
-    monkeypatch.setattr(rejection_refresh_module, "AdditionalUsageRepository", lambda session: StubAdditionalUsageRepository())
+    monkeypatch.setattr(
+        rejection_refresh_module, "AdditionalUsageRepository", lambda session: StubAdditionalUsageRepository()
+    )
     monkeypatch.setattr(rejection_refresh_module, "get_account_selection_cache", lambda: stub_cache)
     monkeypatch.setattr(usage_updater_module, "get_settings", _Settings)
     monkeypatch.setattr(usage_updater_module, "fetch_usage", fake_fetch_usage)

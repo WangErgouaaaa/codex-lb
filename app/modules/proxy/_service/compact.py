@@ -385,9 +385,10 @@ def _service_tier_from_response(response: CompactResponsePayload | None) -> str 
 
 
 def _upstream_model_from_response(response: CompactResponsePayload | None) -> str | None:
-    return cast(Callable[[CompactResponsePayload | None], str | None], _service_global("_upstream_model_from_response"))(
-        response
+    resolver = cast(
+        Callable[[CompactResponsePayload | None], str | None], _service_global("_upstream_model_from_response")
     )
+    return resolver(response)
 
 
 def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:

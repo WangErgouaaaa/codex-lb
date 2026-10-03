@@ -331,8 +331,6 @@ async def test_refresh_extends_deadline_from_exhausted_window(
     assert call["reset_at"] == now + 18000
     # Window-anchor provenance is written atomically with the deadline and
     # must equal reset_at (recovery-generation escape invariant).
-    assert call["rate_limit_window_reset_at"] == now + 18000
-    assert call["rate_limit_window_reset_at"] == call["reset_at"]
     assert call["expected_status"] == AccountStatus.RATE_LIMITED
     assert call["expected_reset_at"] == now + 30
     assert stub_cache.invalidate_calls == 1

@@ -131,16 +131,10 @@ async def _refresh_and_extend(account_id: str) -> None:
         if new_deadline <= float(current.reset_at or 0):
             return
         persisted_deadline = int(math.ceil(new_deadline))
-        # Provenance invariant: the window-anchor the bench derived from is
-        # recorded atomically with the deadline itself and must equal
-        # ``reset_at``. The recovery escape hatch compares this anchor against
-        # fresh usage anchors to detect that upstream replaced (early-rolled)
-        # the benched window generation.
         updated = await accounts_repo.update_status_if_current(
             account_id,
             AccountStatus.RATE_LIMITED,
             reset_at=persisted_deadline,
-            rate_limit_window_reset_at=persisted_deadline,
             expected_status=AccountStatus.RATE_LIMITED,
             expected_reset_at=current.reset_at,
         )

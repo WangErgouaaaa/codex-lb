@@ -456,6 +456,7 @@ class RequestLog(Base):
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    actual_model: Mapped[str | None] = mapped_column(String, nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)

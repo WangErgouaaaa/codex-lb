@@ -2,6 +2,13 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
+import {
+  ALL_REQUEST_LOG_COLUMNS,
+  MAX_REQUEST_LOG_COLUMN_WIDTH,
+  MIN_REQUEST_LOG_COLUMN_WIDTH,
+  REQUEST_LOG_COLUMN_WIDTH_STEP,
+} from "@/features/dashboard/request-log-columns";
+import type { RequestLog } from "@/features/dashboard/schemas";
 
 const ISO = "2026-01-01T12:00:00+00:00";
 const NULL_FAILURE_METADATA = {
@@ -47,6 +54,42 @@ const PAGINATION_PROPS = {
   onOffsetChange: vi.fn(),
 };
 
+const LAYOUT_REQUEST = {
+  requestedAt: ISO,
+  accountId: "acc-layout",
+  planType: "plus",
+  apiKeyName: "Layout Key",
+  apiKeyId: "key-layout",
+  requestId: "req-layout",
+  conversationId: null,
+  requestKind: "normal",
+  model: "gpt-5.1",
+  source: null,
+  serviceTier: null,
+  requestedServiceTier: null,
+  actualServiceTier: null,
+  actualModel: null,
+  transport: "http",
+  upstreamTransport: "http",
+  status: "ok",
+  errorCode: null,
+  errorMessage: null,
+  ...NULL_FAILURE_METADATA,
+  ...NULL_USERAGENT_METADATA,
+  tokens: 1200,
+  inputTokens: 1000,
+  outputTokens: 200,
+  outputTokensRaw: 200,
+  reasoningTokens: 0,
+  latencyFirstTokenMs: 200,
+  latencyQueueMs: null,
+  cachedInputTokens: 0,
+  reasoningEffort: null,
+  costUsd: 0.01,
+  costBreakdown: null,
+  latencyMs: 1000,
+} satisfies RequestLog;
+
 function openRequestDetails() {
   fireEvent.click(screen.getByRole("button", { name: "View Details" }));
   return screen.getByRole("dialog");
@@ -66,6 +109,127 @@ describe("RecentRequestsTable", () => {
     if (originalIsSecureContext) {
       Object.defineProperty(window, "isSecureContext", originalIsSecureContext);
     }
+  });
+
+  it("renders every existing column when layout props are omitted", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+      />,
+    );
+
+    expect(screen.getAllByRole("columnheader")).toHaveLength(ALL_REQUEST_LOG_COLUMNS.length);
+    expect(screen.getByText("Layout Key")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View Details" })).toBeInTheDocument();
+  });
+
+  it("renders only selected headers and matching row cells", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "model"]}
+      />,
+    );
+
+    expect(screen.getAllByRole("columnheader")).toHaveLength(2);
+    expect(screen.getByRole("columnheader", { name: "Time" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Model" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "API Key" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Layout Key")).not.toBeInTheDocument();
+    expect(screen.getByText("gpt-5.1")).toBeInTheDocument();
+  });
+
+  it("resizes only the selected column by pointer and clamps it to bounds", () => {
+    const onColumnWidthChange = vi.fn();
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: 112, account: 160 }}
+        onColumnWidthChange={onColumnWidthChange}
+      />,
+    );
+
+    const accountSeparator = screen.getByRole("separator", {
+      name: "Resize Account column",
+    });
+    fireEvent.pointerDown(accountSeparator, { pointerId: 7, clientX: 100 });
+    fireEvent.pointerMove(accountSeparator, { pointerId: 7, clientX: 164 });
+    fireEvent.pointerUp(accountSeparator, { pointerId: 7, clientX: 164 });
+
+    expect(onColumnWidthChange).toHaveBeenCalledWith("account", 224);
+    expect(onColumnWidthChange).not.toHaveBeenCalledWith("time", expect.any(Number));
+
+    onColumnWidthChange.mockClear();
+    fireEvent.pointerDown(accountSeparator, { pointerId: 8, clientX: 100 });
+    fireEvent.pointerMove(accountSeparator, { pointerId: 8, clientX: 10_000 });
+    expect(onColumnWidthChange).toHaveBeenLastCalledWith(
+      "account",
+      MAX_REQUEST_LOG_COLUMN_WIDTH,
+    );
+  });
+
+  it("resizes with arrow keys within bounds and sums visible widths", () => {
+    const onColumnWidthChange = vi.fn();
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: MIN_REQUEST_LOG_COLUMN_WIDTH, account: 200 }}
+        onColumnWidthChange={onColumnWidthChange}
+      />,
+    );
+
+    expect(screen.getByRole("table")).toHaveStyle({
+      width: `${MIN_REQUEST_LOG_COLUMN_WIDTH + 200}px`,
+      minWidth: `${MIN_REQUEST_LOG_COLUMN_WIDTH + 200}px`,
+    });
+
+    const timeSeparator = screen.getByRole("separator", {
+      name: "Resize Time column",
+    });
+    fireEvent.keyDown(timeSeparator, { key: "ArrowLeft" });
+    expect(onColumnWidthChange).toHaveBeenLastCalledWith(
+      "time",
+      MIN_REQUEST_LOG_COLUMN_WIDTH,
+    );
+
+    const accountSeparator = screen.getByRole("separator", {
+      name: "Resize Account column",
+    });
+    fireEvent.keyDown(accountSeparator, { key: "ArrowRight" });
+    expect(onColumnWidthChange).toHaveBeenLastCalledWith(
+      "account",
+      200 + REQUEST_LOG_COLUMN_WIDTH_STEP,
+    );
+  });
+
+  it("pins the table to the configured width sum so surplus space is not redistributed", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: 112, account: 160 }}
+        onColumnWidthChange={vi.fn()}
+      />,
+    );
+
+    // An explicit width (not merely a minimum) keeps configured column widths
+    // independent when their sum is smaller than the container.
+    expect(screen.getByRole("table")).toHaveStyle({
+      width: "272px",
+      minWidth: "272px",
+    });
   });
 
   it("renders rows with status badges and supports request details and copy actions", async () => {
@@ -111,6 +275,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: "default",
             requestedServiceTier: "priority",
             actualServiceTier: "default",
+            actualModel: null,
             transport: "websocket",
              status: "rate_limit",
              errorCode: "rate_limit_exceeded",
@@ -195,6 +360,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             ...NULL_USERAGENT_METADATA,
             status: "ok",
@@ -225,6 +391,76 @@ describe("RecentRequestsTable", () => {
     expect(within(row as HTMLElement).getByText("200.0")).toBeInTheDocument();
   });
 
+  it("shows reasoning as secondary token metadata and an included-output detail", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-reasoning",
+            reasoningTokens: 80,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("1.2K")).toBeInTheDocument();
+    expect(screen.getByText("80 reasoning")).toBeInTheDocument();
+
+    const dialog = openRequestDetails();
+    const reasoningLabel = within(dialog).getByText(
+      "Reasoning tokens (included in output)",
+    );
+    expect(reasoningLabel.parentElement?.parentElement).toHaveTextContent("80");
+  });
+
+  it("renders a known zero reasoning count", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-zero-reasoning",
+            reasoningTokens: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("0 reasoning")).toBeInTheDocument();
+    const dialog = openRequestDetails();
+    const reasoningLabel = within(dialog).getByText(
+      "Reasoning tokens (included in output)",
+    );
+    expect(reasoningLabel.parentElement?.parentElement).toHaveTextContent("0");
+  });
+
+  it("omits unknown reasoning usage instead of estimating it", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-unknown-reasoning",
+            reasoningTokens: null,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/reasoning/i)).not.toBeInTheDocument();
+    const dialog = openRequestDetails();
+    expect(
+      within(dialog).queryByText("Reasoning tokens (included in output)"),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not calculate TPS from fallback output tokens", () => {
     render(
       <RecentRequestsTable
@@ -245,6 +481,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             ...NULL_USERAGENT_METADATA,
             status: "ok",
@@ -303,6 +540,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             ...NULL_USERAGENT_METADATA,
             status: "ok",
@@ -335,6 +573,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             ...NULL_USERAGENT_METADATA,
              status: "ok",
@@ -380,6 +619,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: null,
             ...NULL_USERAGENT_METADATA,
              status: "ok",
@@ -427,6 +667,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             ...NULL_USERAGENT_METADATA,
              status: "error",
@@ -475,6 +716,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             ...NULL_USERAGENT_METADATA,
             status: "ok",
@@ -532,6 +774,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             useragent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
             useragentGroup: "Mozilla",
@@ -595,6 +838,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             useragent: null,
             useragentGroup: null,
@@ -652,6 +896,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             ...NULL_USERAGENT_METADATA,
             status: "error",
@@ -704,6 +949,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             ...NULL_USERAGENT_METADATA,
             status: "ok",
@@ -761,6 +1007,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             ...NULL_USERAGENT_METADATA,
             status: "ok",
@@ -818,6 +1065,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             useragent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36",
             useragentGroup: "Mozilla",
@@ -879,6 +1127,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             useragent: null,
             useragentGroup: null,
@@ -936,6 +1185,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             useragent: null,
             useragentGroup: null,
@@ -991,6 +1241,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             useragent: null,
             useragentGroup: null,
@@ -1045,6 +1296,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             useragent: null,
             useragentGroup: null,
@@ -1102,6 +1354,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             useragent: null,
             useragentGroup: null,
@@ -1154,6 +1407,7 @@ describe("RecentRequestsTable", () => {
             serviceTier: null,
             requestedServiceTier: null,
             actualServiceTier: null,
+            actualModel: null,
             transport: "http",
             useragent: null,
             useragentGroup: null,
@@ -1184,5 +1438,79 @@ describe("RecentRequestsTable", () => {
     expect(textEl.tagName).toBe("P");
     expect(textEl).toHaveClass("truncate");
     expect(textEl).toHaveAttribute("title", longId);
+  });
+
+  it("shows the upstream model row with a mismatch badge when the served model differs", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-upstream-mismatch",
+            model: "gpt-5.1",
+            actualModel: "gpt-5.2",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("↳ Upstream: gpt-5.2")).toBeInTheDocument();
+    expect(screen.getByText("Model mismatch")).toBeInTheDocument();
+
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("Upstream")).toBeInTheDocument();
+    expect(within(dialog).getByText("gpt-5.2")).toBeInTheDocument();
+  });
+
+  it("shows the upstream model row without a mismatch badge when only date suffixes differ", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-upstream-suffix",
+            model: "gpt-5.1-2026-09-21",
+            actualModel: "gpt-5.1-20260921",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("↳ Upstream: gpt-5.1-20260921")).toBeInTheDocument();
+    expect(screen.queryByText("Model mismatch")).not.toBeInTheDocument();
+
+    const dialog = openRequestDetails();
+    expect(within(dialog).getByText("Upstream")).toBeInTheDocument();
+    expect(within(dialog).getByText("gpt-5.1-20260921")).toBeInTheDocument();
+  });
+
+  it("omits the upstream model row when actual model is null", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-upstream-null",
+            model: "gpt-5.1",
+            actualModel: null,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/↳ Upstream:/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Model mismatch")).not.toBeInTheDocument();
+
+    const dialog = openRequestDetails();
+    const upstreamField = within(dialog).getByText("Upstream").closest("div.space-y-1");
+
+    expect(upstreamField).not.toBeNull();
+    expect(upstreamField).toHaveTextContent("—");
   });
 });

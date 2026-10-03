@@ -29,6 +29,8 @@ import {
   formatTokensWithCached,
   formatWindowLabel,
   formatWindowMinutes,
+  isModelMismatch,
+  normalizeModelSlug,
   parseDate,
   toNumber,
   truncateText,
@@ -234,5 +236,41 @@ it("formats elapsed latency values", () => {
         idToken: { state: "unknown" },
       }),
     ).toBe("Unknown");
+  });
+
+  it("normalizes model slugs across date suffix forms and alias tokens", () => {
+    // Both date-suffix shapes collapse to the same base slug.
+    expect(normalizeModelSlug("gpt-5.1-2026-09-21")).toBe("gpt-5.1");
+    expect(normalizeModelSlug("gpt-5.1-20260921")).toBe("gpt-5.1");
+    expect(normalizeModelSlug("gpt-5.1-2026-09-21")).toBe(normalizeModelSlug("gpt-5.1-20260921"));
+
+    // Trimming and case insensitivity.
+    expect(normalizeModelSlug("GPT-5.1-2026-09-21")).toBe("gpt-5.1");
+    expect(normalizeModelSlug("  GPT-5.1  ")).toBe("gpt-5.1");
+
+    // Alias token suffixes from the table are stripped.
+    expect(normalizeModelSlug("gpt-5.1-high")).toBe("gpt-5.1");
+    expect(normalizeModelSlug("gpt-5.1-max")).toBe("gpt-5.1");
+    expect(normalizeModelSlug("gpt-5.1-reasoning")).toBe("gpt-5.1");
+    expect(normalizeModelSlug("claude-sonnet-4-thinking")).toBe("claude-sonnet-4");
+
+    // Base slugs without date or alias suffixes are kept.
+    expect(normalizeModelSlug("gpt-5.1")).toBe("gpt-5.1");
+  });
+
+  it("detects upstream model mismatch and ignores equivalent slugs", () => {
+    // A real model switch is a mismatch.
+    expect(isModelMismatch("gpt-5.1", "gpt-5.2")).toBe(true);
+    expect(isModelMismatch("gpt-5.1-2026-09-21", "gpt-5.2")).toBe(true);
+
+    // Equivalent slugs (date-suffix shape, alias token, case) are not.
+    expect(isModelMismatch("gpt-5.1-2026-09-21", "gpt-5.1-20260921")).toBe(false);
+    expect(isModelMismatch("GPT-5.1", "gpt-5.1")).toBe(false);
+    expect(isModelMismatch("gpt-5.1-high", "gpt-5.1")).toBe(false);
+
+    // Null, undefined, and empty actual models never mismatch.
+    expect(isModelMismatch("gpt-5.1", null)).toBe(false);
+    expect(isModelMismatch("gpt-5.1", undefined)).toBe(false);
+    expect(isModelMismatch("gpt-5.1", "")).toBe(false);
   });
 });

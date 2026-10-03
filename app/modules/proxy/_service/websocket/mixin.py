@@ -3707,6 +3707,9 @@ class _WebSocketMixin:
                 if actual_service_tier is not None:
                     request_state.actual_service_tier = actual_service_tier
                     request_state.service_tier = actual_service_tier
+                upstream_model = _facade()._upstream_model_from_event_payload(payload)
+                if upstream_model is not None:
+                    request_state.actual_model = upstream_model
                 completed_tool_call = _facade()._response_output_item_done_tool_call(payload)
                 if completed_tool_call is not None:
                     completed_call_id, completed_call_type = completed_tool_call
@@ -4388,6 +4391,9 @@ class _WebSocketMixin:
         if actual_service_tier is not None:
             request_state.actual_service_tier = actual_service_tier
             response_service_tier = actual_service_tier
+        upstream_model = _facade()._upstream_model_from_event_payload(payload)
+        if upstream_model is not None:
+            request_state.actual_model = upstream_model
 
         settlement = _StreamSettlement(
             status=status,
@@ -4487,6 +4493,7 @@ class _WebSocketMixin:
                 service_tier=response_service_tier,
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
+                actual_model=request_state.actual_model,
                 latency_first_token_ms=request_state.latency_first_token_ms,
                 latency_response_created_ms=request_state.latency_response_created_ms,
                 latency_first_upstream_event_ms=request_state.latency_first_upstream_event_ms,
@@ -4554,6 +4561,7 @@ class _WebSocketMixin:
             service_tier=request_state.service_tier,
             requested_service_tier=request_state.requested_service_tier,
             actual_service_tier=request_state.actual_service_tier,
+            actual_model=request_state.actual_model,
             latency_first_token_ms=request_state.latency_first_token_ms,
             latency_response_created_ms=request_state.latency_response_created_ms,
             latency_first_upstream_event_ms=request_state.latency_first_upstream_event_ms,
@@ -4801,6 +4809,7 @@ class _WebSocketMixin:
                 service_tier=request_state.service_tier,
                 requested_service_tier=request_state.requested_service_tier,
                 actual_service_tier=request_state.actual_service_tier,
+                actual_model=request_state.actual_model,
                 latency_first_token_ms=request_state.latency_first_token_ms,
                 session_id=request_state.session_id,
                 upstream_proxy_route_mode=request_state.upstream_proxy_route_mode,

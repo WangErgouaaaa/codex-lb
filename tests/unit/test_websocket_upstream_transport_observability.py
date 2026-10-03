@@ -76,6 +76,10 @@ class _DummyFacade:
         return None
 
     @staticmethod
+    def _upstream_model_from_event_payload(_payload: object) -> None:
+        return None
+
+    @staticmethod
     def _should_penalize_stream_error(_error_code: object) -> bool:
         return False
 
@@ -219,6 +223,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "service_tier": None,
             "requested_service_tier": None,
             "actual_service_tier": None,
+            "actual_model": None,
             "latency_first_token_ms": None,
             "latency_response_created_ms": None,
             "latency_first_upstream_event_ms": None,
@@ -301,6 +306,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
             "service_tier": None,
             "requested_service_tier": None,
             "actual_service_tier": None,
+            "actual_model": None,
             "latency_first_token_ms": None,
             "latency_response_created_ms": None,
             "latency_first_upstream_event_ms": None,
@@ -377,6 +383,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "service_tier": None,
             "requested_service_tier": None,
             "actual_service_tier": None,
+            "actual_model": None,
             "latency_first_token_ms": None,
             "session_id": None,
             "upstream_proxy_route_mode": None,

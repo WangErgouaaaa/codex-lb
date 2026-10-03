@@ -265,6 +265,21 @@ export function formatModelLabel(
   return suffix ? `${base} (${suffix})` : base;
 }
 
+export function normalizeModelSlug(model: string): string {
+  return model
+    .trim()
+    .toLowerCase()
+    .replace(/-(\d{4})-?(\d{2})-?(\d{2})$/, "")
+    .replace(/-(minimal|low|medium|high|xhigh|extra|ultra|max|fast|priority|reasoning|thinking)$/, "");
+}
+
+export function isModelMismatch(requested: string, actual: string | null | undefined): boolean {
+  if (!actual) {
+    return false;
+  }
+  return normalizeModelSlug(requested) !== normalizeModelSlug(actual);
+}
+
 export function formatTimeLong(iso: string | null | undefined): FormattedDateTime {
   const date = parseDate(iso);
   if (!date) {

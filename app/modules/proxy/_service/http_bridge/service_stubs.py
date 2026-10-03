@@ -419,6 +419,10 @@ def _service_tier_from_event_payload(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_service_tier_from_event_payload")(*args, **kwargs)
 
 
+def _upstream_model_from_event_payload(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_upstream_model_from_event_payload")(*args, **kwargs)
+
+
 def _response_output_item_done_tool_call(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_response_output_item_done_tool_call")(*args, **kwargs)
 

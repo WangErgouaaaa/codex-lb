@@ -728,6 +728,7 @@ def _write_response_create_dump(
             "service_tier": request_state.service_tier,
             "requested_service_tier": request_state.requested_service_tier,
             "actual_service_tier": request_state.actual_service_tier,
+            "actual_model": request_state.actual_model,
             "previous_response_id": request_state.previous_response_id,
             "awaiting_response_created": request_state.awaiting_response_created,
             "replay_count": request_state.replay_count,

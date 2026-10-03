@@ -384,6 +384,12 @@ def _service_tier_from_response(response: CompactResponsePayload | None) -> str 
     )
 
 
+def _upstream_model_from_response(response: CompactResponsePayload | None) -> str | None:
+    return cast(Callable[[CompactResponsePayload | None], str | None], _service_global("_upstream_model_from_response"))(
+        response
+    )
+
+
 def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:
     return cast(
         Callable[[str | None, str | None], str | None],
@@ -608,6 +614,7 @@ class _CompactMixin:
         response: CompactResponsePayload | None = None
         request_service_tier: str | None = None
         actual_service_tier: str | None = None
+        actual_model: str | None = None
         route_mode: str | None = None
         route_pool_id: str | None = None
         route_endpoint_id: str | None = None
@@ -1163,6 +1170,7 @@ class _CompactMixin:
                         response = await _call_compact(account, account_response_create_lease)
                         network_recovery.log_recovered()
                         actual_service_tier = _service_tier_from_response(response)
+                        actual_model = _upstream_model_from_response(response)
                         await proxy._load_balancer.record_success(account)
                         await proxy._settle_compact_api_key_usage(
                             api_key=api_key,
@@ -1598,6 +1606,7 @@ class _CompactMixin:
                 service_tier=_effective_service_tier(request_service_tier, actual_service_tier),
                 requested_service_tier=request_service_tier,
                 actual_service_tier=actual_service_tier,
+                actual_model=actual_model,
                 failure_phase=failure_metadata.failure_phase,
                 failure_detail=failure_metadata.failure_detail,
                 failure_exception_type=failure_metadata.failure_exception_type,

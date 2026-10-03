@@ -82,6 +82,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _service_get_settings,
     _service_tier_from_event_payload,
     _service_time,
+    _upstream_model_from_event_payload,
     _upstream_websocket_disconnect_message,
     _websocket_auth_request_can_switch_account,
     _websocket_downstream_response_id,
@@ -773,6 +774,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if actual_service_tier is not None:
                     matched_request_state.actual_service_tier = actual_service_tier
                     matched_request_state.service_tier = actual_service_tier
+                upstream_model = _upstream_model_from_event_payload(payload)
+                if upstream_model is not None:
+                    matched_request_state.actual_model = upstream_model
                 if event_type == "response.output_item.done":
                     done_item = payload.get("item") if isinstance(payload, dict) else None
                     if isinstance(done_item, dict):

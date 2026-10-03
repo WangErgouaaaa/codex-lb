@@ -2585,6 +2585,28 @@ def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> st
     return _normalize_service_tier_value(response.get("service_tier"))
 
 
+def _upstream_model_from_event_payload(payload: dict[str, JsonValue] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    response = payload.get("response")
+    if not isinstance(response, dict):
+        return None
+    model = response.get("model")
+    return model if isinstance(model, str) and model else None
+
+
+def _upstream_model_from_response(
+    response: OpenAIResponsePayload | CompactResponsePayload | None,
+) -> str | None:
+    if response is None:
+        return None
+    extra = response.model_extra
+    if not isinstance(extra, Mapping):
+        return None
+    model = extra.get("model")
+    return model if isinstance(model, str) and model else None
+
+
 def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:
     if isinstance(actual_service_tier, str):
         return actual_service_tier

@@ -501,6 +501,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         requested_service_tier = payload.service_tier
         service_tier = requested_service_tier
         actual_service_tier: str | None = None
+        actual_model: str | None = None
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         session_id = _owner_lookup_session_id_from_headers(headers)
         start = time.monotonic()
@@ -633,6 +634,9 @@ class _StreamingMixin(_StreamingRetryMixin):
             if event_service_tier is not None:
                 actual_service_tier = event_service_tier
                 service_tier = event_service_tier
+            event_upstream_model = _facade()._upstream_model_from_event_payload(first_payload)
+            if event_upstream_model is not None:
+                actual_model = event_upstream_model
             if event and event.response and event.response.id:
                 response_id = event.response.id
                 settlement.response_id = response_id
@@ -807,6 +811,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
                     service_tier = event_service_tier
+                event_upstream_model = _facade()._upstream_model_from_event_payload(event_payload)
+                if event_upstream_model is not None:
+                    actual_model = event_upstream_model
                 line, event_payload, event, event_type = _rewrite_tool_call_line(line, event_payload, event=event)
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     saw_text_delta = True
@@ -1072,6 +1079,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 service_tier=service_tier,
                 requested_service_tier=requested_service_tier,
                 actual_service_tier=actual_service_tier,
+                actual_model=actual_model,
                 latency_first_token_ms=latency_first_token_ms,
                 latency_queue_ms=latency_queue_ms,
                 session_id=session_id,

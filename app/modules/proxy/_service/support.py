@@ -767,6 +767,7 @@ class _WebSocketRequestState:
     archive_request_id: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None
+    actual_model: str | None = None
     response_id: str | None = None
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None

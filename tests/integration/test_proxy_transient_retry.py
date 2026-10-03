@@ -10,17 +10,22 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import time
 
 import aiohttp
 import pytest
+from sqlalchemy import select
 
 import app.modules.proxy.service as proxy_module
+import app.modules.usage.updater as usage_updater_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload
+from app.core.usage.models import RateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -1228,3 +1233,70 @@ async def test_compact_sticky_503_unknown_code_excludes_failing_account_on_failo
     assert response.status_code == 200
     assert response.json()["object"] == "response.compaction"
     assert seen_account_ids[:2] == ["acc_sticky_503_a", "acc_sticky_503_b"]
+
+
+@pytest.mark.asyncio
+async def test_stream_connect_phase_429_triggers_usage_limit_refresh(async_client, monkeypatch):
+    """Connect-phase 429 on A failovers to B and the rejection-triggered
+    usage refresh extends A's persisted reset_at to the real exhausted window."""
+    account_a_id = await _import_account(async_client, "acc_refresh_429_a", "refresh429a@example.com")
+    await _import_account(async_client, "acc_refresh_429_b", "refresh429b@example.com")
+
+    window_reset_at = int(time.time()) + 18000
+    fetch_calls: list[str | None] = []
+
+    async def fake_fetch_usage(**kwargs):
+        fetch_calls.append(kwargs.get("account_id"))
+        return UsagePayload(
+            plan_type="plus",
+            rate_limit=RateLimitPayload(
+                primary_window=UsageWindow(used_percent=100.0, reset_at=window_reset_at),
+            ),
+        )
+
+    monkeypatch.setattr(usage_updater_module, "fetch_usage", fake_fetch_usage)
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if account_id == "acc_refresh_429_a":
+            raise ProxyResponseError(
+                429,
+                openai_error("usage_limit_reached", "usage limit reached"),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_refresh_429_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    completed = [e for e in events if e.get("type") == "response.completed"]
+    failed = [e for e in events if e.get("type") == "response.failed"]
+    assert len(completed) == 1
+    assert len(failed) == 0
+    assert seen_account_ids[:2] == ["acc_refresh_429_a", "acc_refresh_429_b"]
+
+    # The rejection-triggered fire-and-forget refresh runs on the same loop:
+    # poll briefly for A's persisted row to carry the real window deadline.
+    deadline = time.monotonic() + 10
+    account_a_row: Account | None = None
+    while time.monotonic() < deadline:
+        async with SessionLocal() as session:
+            account_a_row = (
+                await session.execute(select(Account).where(Account.id == account_a_id))
+            ).scalar_one()
+        if account_a_row.reset_at is not None and account_a_row.reset_at >= window_reset_at:
+            break
+        await asyncio.sleep(0.05)
+
+    assert fetch_calls, "rejection-triggered usage refresh never fetched usage for account A"
+    assert account_a_row is not None
+    assert account_a_row.status == AccountStatus.RATE_LIMITED
+    assert account_a_row.reset_at is not None
+    assert account_a_row.reset_at >= window_reset_at

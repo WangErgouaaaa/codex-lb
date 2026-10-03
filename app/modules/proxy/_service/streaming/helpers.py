@@ -406,6 +406,7 @@ from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
 from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.usage.rejection_refresh import maybe_trigger_usage_limit_refresh
 
 
 def _facade() -> Any:
@@ -820,6 +821,7 @@ async def _handle_stream_error(
         return classified
     if classified["failure_class"] == "rate_limit":
         await proxy._load_balancer.mark_rate_limit(account, error)
+        maybe_trigger_usage_limit_refresh(account.id, code)
     elif classified["failure_class"] == "quota":
         await proxy._load_balancer.mark_quota_exceeded(account, error)
     elif code in PERMANENT_FAILURE_CODES:

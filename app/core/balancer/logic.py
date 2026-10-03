@@ -1102,6 +1102,14 @@ def _select_fill_first(available: list[AccountState]) -> AccountState:
 # ``cooldown_until`` keeps the raw backoff.
 RATE_LIMITED_MIN_COOLDOWN_SECONDS = 30.0
 
+# A usage_history row at or above this used percentage counts as evidence that
+# its window is exhausted. Shared by the balancer's exhausted-evidence
+# deadline floor (``_exhausted_window_deadline``) and the usage-limit
+# rejection refresh's deadline extension so both agree on where "exhausted"
+# begins; it lives in the core layer so both consumers import it without
+# import cycles.
+USAGE_EXHAUSTED_USED_PERCENT_THRESHOLD = 99.5
+
 
 def handle_rate_limit(state: AccountState, error: UpstreamError) -> None:
     now = time.time()

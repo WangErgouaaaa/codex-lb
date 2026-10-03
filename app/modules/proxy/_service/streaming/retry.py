@@ -395,6 +395,7 @@ class _StreamingRetryMixin:
         last_security_work_retry_error: _RetryableStreamError | None = None
         excluded_account_ids: set[str] = set()
         transient_failed_account_id: str | None = None
+        last_attempt_account_id: str | None = None
         hard_affinity_same_owner_retry_attempted = False
         deferred_capacity_account: Account | None = None
         deferred_capacity_lease: AccountLease | None = None
@@ -1256,7 +1257,7 @@ class _StreamingRetryMixin:
                         )
                         yield format_sse_event(event)
                         await proxy._write_request_log(
-                            account_id=None,
+                            account_id=last_attempt_account_id,
                             api_key=api_key,
                             request_id=request_id,
                             model=payload.model,
@@ -1388,6 +1389,10 @@ class _StreamingRetryMixin:
                     post_refresh_transient_replacement_selected = True
 
                 account_id_value = account.id
+                # Pool-exhausted terminal rows carry the last attempted
+                # account: the final retryable stream error provably comes
+                # from the most recent attempt.
+                last_attempt_account_id = account.id
                 if last_account_model_rejection is not None and account.id != last_account_model_rejection_account_id:
                     # The original 400 is only the fallback when account
                     # selection cannot produce a replacement. Once this
@@ -1999,7 +2004,9 @@ class _StreamingRetryMixin:
                                 )
                                 if action == "failover_next":
                                     last_transient_exc = tex
-                                    transient_failed_account_id = account.id
+                                    transient_failed_account_id = (
+                                        account.id if classified["failure_class"] == "retryable_transient" else None
+                                    )
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     excluded_account_ids.add(account.id)

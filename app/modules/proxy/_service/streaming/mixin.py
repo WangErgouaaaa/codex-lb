@@ -268,12 +268,13 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.streaming.continuity import _record_http_continuity
 from app.modules.proxy._service.streaming.helpers import (
-    _handle_stream_error as _handle_stream_error_helper,
-)
-from app.modules.proxy._service.streaming.helpers import (
+    _count_moderation_stream_event,
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
     _raw_stream_error_code_or_upstream,
+)
+from app.modules.proxy._service.streaming.helpers import (
+    _handle_stream_error as _handle_stream_error_helper,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _raw_stream_error_fields as _raw_error_fields,
@@ -1050,6 +1051,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             settlement.cached_input_tokens = cached_input_tokens
             settlement.error_code = error_code
             settlement.error_message = error_message
+            await _count_moderation_stream_event(proxy, account, status, error_code, settlement)
             await proxy._write_request_log(
                 account_id=account_id_value,
                 api_key=api_key,

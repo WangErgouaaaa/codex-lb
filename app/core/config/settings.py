@@ -379,6 +379,21 @@ class Settings(BaseSettings):
     # Persisted registry snapshots older than this are ignored at load time
     # (bootstrap catalog remains the floor until the next leader refresh).
     model_registry_snapshot_max_age_seconds: int = Field(default=86400, gt=0)
+    # Content-moderation burst guard: when one account collects this many
+    # moderation error flags (codes below) within the rolling window, it is
+    # paused pending manual review. Bursts interleave successes between the
+    # flags (2026-10-03: 6 flags in 4 minutes with a success inside the same
+    # second as every flag; the 168-flag/32-minute burst that preceded a
+    # production account ban had roughly half its interleaved requests
+    # succeeding), so counting is window-based, never reset by successes.
+    # 5-in-15-minutes sits far above the false-positive noise (1-2 sporadic
+    # flags per day, never clustered) and trips within ~3 minutes of a
+    # 30-40s-cadence moderation retry loop.
+    bio_policy_burst_error_codes: Annotated[frozenset[str], NoDecode] = Field(
+        default_factory=lambda: frozenset({"bio_policy"})
+    )
+    bio_policy_burst_window_seconds: int = Field(default=900, gt=0)
+    bio_policy_burst_threshold: int = Field(default=5, gt=1)
     strict_service_tier_account_filter: bool = True
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     proxy_unauthenticated_client_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)

@@ -381,6 +381,15 @@ from app.modules.proxy._service.websocket.helpers import (
 from app.modules.proxy.affinity import (
     _sticky_key_from_session_header,  # noqa: F401
 )
+from app.modules.proxy.bio_policy_guard import (
+    handle_moderation_stream_error as handle_moderation_stream_error,
+)
+from app.modules.proxy.bio_policy_guard import (
+    pause_account_for_moderation_burst as pause_account_for_moderation_burst,
+)
+from app.modules.proxy.bio_policy_guard import (
+    record_moderation_flag as record_moderation_flag,
+)
 from app.modules.proxy.continuity import continuity_error_type_and_param, continuity_owner_unavailable_fields
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
@@ -823,7 +832,34 @@ async def _handle_stream_error(
             get_request_id(),
             code,
         )
+        # Moderation flags never trip the error backoff above on their own
+        # (interleaved successes reset error_count), so a burst would silently
+        # keep hammering upstream enforcement; the guard pauses the account.
+        await handle_moderation_stream_error(proxy._load_balancer, account, error_code=code)
     return classified
+
+
+async def _count_moderation_stream_event(
+    proxy: Any,
+    account: Account,
+    status: str | None,
+    error_code: str | None,
+    settlement: Any,
+) -> None:
+    """Feed terminal stream errors that bypass account-health handling to the moderation guard.
+
+    Moderation rejections arrive as SSE ``response.failed`` events carrying
+    non-penalizable codes, so the settlement consumer never calls
+    ``_handle_stream_error`` for them; count them here so the burst guard
+    sees every upstream moderation hit.
+    """
+    if (
+        status == "error"
+        and error_code
+        and settlement.record_success is False
+        and not settlement.account_health_error
+    ):
+        await handle_moderation_stream_error(proxy._load_balancer, account, error_code=error_code)
 
 
 def _push_stream_attempt_timeout_overrides(

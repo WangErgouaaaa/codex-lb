@@ -2842,3 +2842,68 @@ async def test_v1_responses_normalizes_tool_messages(async_client, monkeypatch):
         {"type": "function_call_output", "call_id": "call_1", "output": '{"ok":true}'},
         {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
     ]
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_bio_policy_burst_pauses_account_via_sse_failed_events(
+    async_client,
+    monkeypatch,
+):
+    """Moderation rejections arriving as SSE ``response.failed`` events must
+    feed the burst guard (regression: the original wiring only counted inside
+    ``_handle_stream_error``, which settlement never calls for
+    non-penalizable codes, so real moderation bursts were invisible)."""
+    from app.modules.proxy import bio_policy_guard as guard_module
+
+    guard_module._clear_bio_policy_guard_state()
+    try:
+        email = "bio-burst@example.com"
+        raw_account_id = "acc_bio_burst"
+        auth_json = _make_auth_json(raw_account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+        expected_account_id = generate_unique_account_id(raw_account_id, email)
+
+        async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+            del payload, headers, access_token, account_id, base_url, raise_for_status
+            yield (
+                'data: {"type":"response.failed","response":{"id":"resp_bio",'
+                '"error":{"code":"bio_policy","message":"Content policy"}}}\n\n'
+            )
+
+        monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+        payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+
+        for _ in range(4):
+            async with async_client.stream(
+                "POST",
+                "/backend-api/codex/responses",
+                json=payload,
+            ) as resp:
+                assert resp.status_code == 200
+                lines = [line async for line in resp.aiter_lines() if line]
+            event = _extract_first_event(lines)
+            assert event["type"] == "response.failed"
+            assert event["response"]["error"]["code"] == "bio_policy"
+
+        # Four flags counted in the rolling window; account still routable.
+        assert len(guard_module._flags.get(expected_account_id, ())) == 4
+
+        async with async_client.stream(
+            "POST",
+            "/backend-api/codex/responses",
+            json=payload,
+        ) as resp:
+            assert resp.status_code == 200
+            _ = [line async for line in resp.aiter_lines() if line]
+
+        async with SessionLocal() as session:
+            account = (
+                await session.execute(select(Account).where(Account.id == expected_account_id))
+            ).scalars().one()
+            assert account.status.value == "paused"
+            assert "bio_policy" in (account.deactivation_reason or "")
+    finally:
+        guard_module._clear_bio_policy_guard_state()

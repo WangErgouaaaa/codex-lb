@@ -73,9 +73,14 @@ def request_token_weight(
     reasoning_tokens: int | None,
     cached_input_tokens: int | None,
 ) -> int:
-    """Token footprint used to split a shared delta across concurrent requests."""
+    """Token footprint used to split a shared delta across concurrent requests.
+
+    Cached tokens are a subset of input tokens, so they are deliberately NOT
+    added: weighting by input + output only keeps the split proportional to the
+    real token footprint instead of double-counting the cached share.
+    """
     output = output_tokens if output_tokens is not None else reasoning_tokens
-    return (input_tokens or 0) + (output or 0) + (cached_input_tokens or 0)
+    return (input_tokens or 0) + (output or 0)
 
 
 def split_credits(delta_credits: float, weights: list[int]) -> list[float]:

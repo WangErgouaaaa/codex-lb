@@ -13,7 +13,13 @@ import {
   type UsageStatsRange,
 } from "@/features/dashboard/schemas";
 import { formatCompactNumber, formatCurrency, formatNumber } from "@/utils/formatters";
-import { MAX_VISIBLE_SERIES, OTHER_SERIES_KEY } from "./usage-stats-constants";
+import {
+  isUsageRatioDisplayable,
+  MAX_VISIBLE_SERIES,
+  OTHER_SERIES_KEY,
+  usageUnitPriceRatio,
+} from "./usage-stats-constants";
+import type { UsageUnitPriceRow } from "./usage-stats-unitprice-chart";
 
 const UsageStatsChart = lazy(() =>
   import("./usage-stats-chart").then((module) => ({
@@ -28,24 +34,41 @@ type UsageStatsChartProps = {
   formatValue?: (value: number) => string;
 };
 
+const UsageStatsUnitPriceChart = lazy(() =>
+  import("./usage-stats-unitprice-chart").then((module) => ({
+    default: (props: UsageStatsUnitPriceChartProps) => <module.UsageStatsUnitPriceChart {...props} />,
+  })),
+);
+type UsageStatsUnitPriceChartProps = {
+  rows: UsageUnitPriceRow[];
+};
+
+/** Frontend-only view; "unitprice" is served by the credits metric. */
+type UsageStatsView = UsageStatsMetric | "unitprice";
+
+function toApiMetric(view: UsageStatsView): UsageStatsMetric {
+  return view === "unitprice" ? "credits" : view;
+}
+
 const USAGE_RANGE_OPTIONS: ReadonlyArray<{ value: UsageStatsRange; labelKey: string }> = [
   { value: "today", labelKey: "dashboard.usageStats.range.today" },
   { value: "7d", labelKey: "dashboard.usageStats.range.7d" },
   { value: "30d", labelKey: "dashboard.usageStats.range.30d" },
 ];
 
-const USAGE_METRIC_OPTIONS: ReadonlyArray<{ value: UsageStatsMetric; labelKey: string }> = [
+const USAGE_METRIC_OPTIONS: ReadonlyArray<{ value: UsageStatsView; labelKey: string }> = [
   { value: "tokens", labelKey: "dashboard.usageStats.metric.tokens" },
   { value: "credits", labelKey: "dashboard.usageStats.metric.credits" },
   { value: "cost", labelKey: "dashboard.usageStats.metric.cost" },
+  { value: "unitprice", labelKey: "dashboard.usageStats.metric.unitprice" },
 ];
 
 export function UsageStatsPanel() {
   const { t } = useTranslation();
   const [range, setRange] = useState<UsageStatsRange>(DEFAULT_USAGE_STATS_RANGE);
-  const [metric, setMetric] = useState<UsageStatsMetric>(DEFAULT_USAGE_STATS_METRIC);
+  const [view, setView] = useState<UsageStatsView>(DEFAULT_USAGE_STATS_METRIC);
   const [timeZone] = useState(() => getBrowserReportsTimeZone());
-  const statsQuery = useUsageStats(range, metric, timeZone);
+  const statsQuery = useUsageStats(range, toApiMetric(view), timeZone);
   const data = statsQuery.data;
 
   const chartData = useMemo(() => {
@@ -91,10 +114,42 @@ export function UsageStatsPanel() {
   }, [data, t]);
 
   const metricValueFormatter = (value: number): string => {
-    if (metric === "cost") return formatCurrency(value);
-    if (metric === "credits") return formatCompactNumber(value);
+    if (view === "cost") return formatCurrency(value);
+    if (view === "credits") return formatCompactNumber(value);
     return formatCompactNumber(value);
   };
+
+  // Real unit price rows (credits per 1M attributed tokens), guarded by the
+  // minimum sample size and sorted ascending so the cheapest model wins.
+  const unitPriceRows = useMemo<Array<UsageUnitPriceRow>>(() => {
+    if (!data) {
+      return [];
+    }
+    return data.byModel
+      .filter((entry) => isUsageRatioDisplayable(entry))
+      .map((entry) => ({
+        model: entry.model,
+        name: seriesNames[entry.model] ?? entry.model,
+        ratio: usageUnitPriceRatio(entry),
+      }))
+      .sort((left, right) => left.ratio - right.ratio);
+  }, [data, seriesNames]);
+
+  // The unitprice view locally re-sorts the table: guarded models ascending
+  // by ratio first, unguarded models afterwards in server order.
+  const tableRows = useMemo(() => {
+    if (!data) {
+      return [];
+    }
+    if (view !== "unitprice") {
+      return data.byModel;
+    }
+    const guarded = data.byModel
+      .filter((entry) => isUsageRatioDisplayable(entry))
+      .sort((left, right) => usageUnitPriceRatio(left) - usageUnitPriceRatio(right));
+    const unguarded = data.byModel.filter((entry) => !isUsageRatioDisplayable(entry));
+    return [...guarded, ...unguarded];
+  }, [data, view]);
 
   const isEmpty = !data || data.series.every((bucket) => Object.keys(bucket.values).length === 0);
 
@@ -125,7 +180,7 @@ export function UsageStatsPanel() {
             data-testid="usage-stats-metric-toggle"
           >
             {USAGE_METRIC_OPTIONS.map((option) => {
-              const isSelected = metric === option.value;
+              const isSelected = view === option.value;
               return (
                 <Button
                   key={option.value}
@@ -134,7 +189,7 @@ export function UsageStatsPanel() {
                   size="sm"
                   className="h-7 px-2.5 text-xs"
                   aria-pressed={isSelected}
-                  onClick={() => setMetric(option.value)}
+                  onClick={() => setView(option.value)}
                 >
                   {t(option.labelKey)}
                 </Button>
@@ -187,7 +242,7 @@ export function UsageStatsPanel() {
       ) : data ? (
         <>
           <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            {metric === "tokens" ? (
+            {view === "tokens" ? (
               <>
                 <StatCard
                   label={t("dashboard.usageStats.stat.totalTokens")}
@@ -219,7 +274,7 @@ export function UsageStatsPanel() {
                   />
                 )}
               </>
-            ) : metric === "credits" ? (
+            ) : view === "credits" ? (
               <>
                 <StatCard
                   label={t("dashboard.usageStats.stat.totalCredits")}
@@ -250,6 +305,40 @@ export function UsageStatsPanel() {
                     value={formatNumber(data.summary.modelCount)}
                   />
                 )}
+              </>
+            ) : view === "unitprice" ? (
+              <>
+                <StatCard
+                  label={t("dashboard.usageStats.stat.totalCredits")}
+                  value={formatCompactNumber(data.summary.totalCredits)}
+                  sub={t("dashboard.usageStats.stat.creditsNote")}
+                />
+                <StatCard
+                  label={t("dashboard.usageStats.stat.unitPrice")}
+                  value={
+                    data.summary.totalAttributedTokens > 0
+                      ? (
+                          (data.summary.totalCredits / data.summary.totalAttributedTokens) *
+                          1_000_000
+                        ).toFixed(1)
+                      : "—"
+                  }
+                  sub={t("dashboard.usageStats.stat.unitPriceNote")}
+                />
+                <StatCard
+                  label={t("dashboard.usageStats.stat.creditsPerRequest")}
+                  value={(data.summary.totalCredits / Math.max(1, data.summary.attributedRequests)).toFixed(1)}
+                  sub={t("dashboard.usageStats.stat.creditsPerRequestNote")}
+                />
+                <StatCard
+                  label={t("dashboard.usageStats.stat.attributedRequests")}
+                  value={formatNumber(data.summary.attributedRequests)}
+                  sub={
+                    attributedShare != null
+                      ? t("dashboard.usageStats.stat.shareOfRequests", { percent: attributedShare })
+                      : undefined
+                  }
+                />
               </>
             ) : (
               <>
@@ -283,7 +372,7 @@ export function UsageStatsPanel() {
 
           {isEmpty ? (
             <div className="mt-4 flex h-[220px] items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">
-              {metric === "credits"
+              {view === "credits" || view === "unitprice"
                 ? t("dashboard.usageStats.emptyCredits")
                 : t("dashboard.usageStats.empty")}
             </div>
@@ -292,29 +381,43 @@ export function UsageStatsPanel() {
               <div className="mt-5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs font-medium text-muted-foreground">
-                    {t(`dashboard.usageStats.chart.title.${metric}`)}
+                    {t(`dashboard.usageStats.chart.title.${view}`)}
                   </div>
-                  <div className="text-xs text-muted-foreground">
-                    {t("dashboard.usageStats.chart.total")}:{" "}
-                    <span className="font-semibold text-foreground">
-                      {metric === "cost"
-                        ? formatCurrency(data.summary.totalCostUsd)
-                        : metric === "credits"
-                          ? formatCompactNumber(data.summary.totalCredits)
-                          : formatCompactNumber(data.summary.totalTokens)}
-                    </span>
-                  </div>
+                  {view !== "unitprice" ? (
+                    <div className="text-xs text-muted-foreground">
+                      {t("dashboard.usageStats.chart.total")}:{" "}
+                      <span className="font-semibold text-foreground">
+                        {view === "cost"
+                          ? formatCurrency(data.summary.totalCostUsd)
+                          : view === "credits"
+                            ? formatCompactNumber(data.summary.totalCredits)
+                            : formatCompactNumber(data.summary.totalTokens)}
+                      </span>
+                    </div>
+                  ) : null}
                 </div>
                 <div className="mt-2">
-                  <Suspense fallback={<div className="h-[260px] rounded-lg bg-muted/30" />}>
-                    <UsageStatsChart
-                      rows={chartData.rows}
-                      models={chartData.models}
-                      hasOther={chartData.hasOther}
-                      names={seriesNames}
-                      formatValue={metricValueFormatter}
-                    />
-                  </Suspense>
+                  {view === "unitprice" ? (
+                    unitPriceRows.length > 0 ? (
+                      <Suspense fallback={<div className="h-[260px] rounded-lg bg-muted/30" />}>
+                        <UsageStatsUnitPriceChart rows={unitPriceRows} />
+                      </Suspense>
+                    ) : (
+                      <div className="flex h-[220px] items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">
+                        {t("dashboard.usageStats.emptyCredits")}
+                      </div>
+                    )
+                  ) : (
+                    <Suspense fallback={<div className="h-[260px] rounded-lg bg-muted/30" />}>
+                      <UsageStatsChart
+                        rows={chartData.rows}
+                        models={chartData.models}
+                        hasOther={chartData.hasOther}
+                        names={seriesNames}
+                        formatValue={metricValueFormatter}
+                      />
+                    </Suspense>
+                  )}
                 </div>
               </div>
 
@@ -348,7 +451,7 @@ export function UsageStatsPanel() {
                     </tr>
                   </thead>
                   <tbody>
-                    {data.byModel.map((entry) => (
+                    {tableRows.map((entry) => (
                       <tr
                         key={entry.model}
                         data-testid={`usage-stats-row-${entry.model}`}
@@ -366,7 +469,12 @@ export function UsageStatsPanel() {
                         </td>
                         <td className="py-2.5 pr-4 text-right font-medium text-foreground">{formatCompactNumber(entry.totalTokens)}</td>
                         <td className="py-2.5 pr-4 text-right font-medium text-foreground">
-                          {entry.credits > 0 ? formatCompactNumber(entry.credits) : "—"}
+                          <span>{entry.credits > 0 ? formatCompactNumber(entry.credits) : "—"}</span>
+                          <div className="text-[11px] text-muted-foreground">
+                            {isUsageRatioDisplayable(entry)
+                              ? `${usageUnitPriceRatio(entry).toFixed(1)}/1M · n=${entry.attributedRequests}`
+                              : "—"}
+                          </div>
                         </td>
                         <td className="py-2.5 pr-4 text-right font-medium text-foreground">
                           {entry.costUsd > 0 ? formatCurrency(entry.costUsd) : "—"}

@@ -216,17 +216,23 @@ class ReportsService:
         credits_by_model: dict[str, float] = {}
         total_credits = 0.0
         attributed_requests = 0
+        attributed_tokens_by_model: dict[str, int] = {}
+        attributed_requests_by_model: dict[str, int] = {}
         credit_bucket_rows = []
         if self._credit_repository is not None:
             credit_rows = await self._credit_repository.aggregate_credits_by_model(start_at, end_at, CREDITS_WINDOW)
             credits_by_model = {row.model: row.credits_sum for row in credit_rows}
             total_credits = sum(credits_by_model.values())
             attributed_requests = sum(row.request_count for row in credit_rows)
+            attributed_tokens_by_model = {row.model: row.input_tokens + row.output_tokens for row in credit_rows}
+            attributed_requests_by_model = {row.model: row.request_count for row in credit_rows}
             credit_bucket_rows = await self._credit_repository.aggregate_credits_by_model_bucket(
                 bucket_ranges, CREDITS_WINDOW
             )
 
-        total_tokens = summary.total_input_tokens + summary.total_output_tokens + summary.total_cached_tokens
+        # cached_input_tokens is a subset of input_tokens, so token totals
+        # count input + output only — adding cached would double-count it.
+        total_tokens = summary.total_input_tokens + summary.total_output_tokens
         total_cost_usd = sum(row.cost_usd for row in model_rows)
         all_models = {row.model for row in model_rows} | set(credits_by_model)
 
@@ -243,11 +249,7 @@ class ReportsService:
             if metric == "credits":
                 return credits_by_model.get(model, 0.0)
             return next(
-                (
-                    row.input_tokens + row.output_tokens + row.cached_input_tokens
-                    for row in model_rows
-                    if row.model == model
-                ),
+                (row.input_tokens + row.output_tokens for row in model_rows if row.model == model),
                 0,
             )
 
@@ -259,16 +261,14 @@ class ReportsService:
                 output_tokens=next((row.output_tokens for row in model_rows if row.model == model), 0),
                 cached_input_tokens=next((row.cached_input_tokens for row in model_rows if row.model == model), 0),
                 total_tokens=next(
-                    (
-                        row.input_tokens + row.output_tokens + row.cached_input_tokens
-                        for row in model_rows
-                        if row.model == model
-                    ),
+                    (row.input_tokens + row.output_tokens for row in model_rows if row.model == model),
                     0,
                 ),
                 percentage=round(metric_value(model) / metric_total * 100, 1) if metric_total > 0 else 0.0,
                 cost_usd=round(next((row.cost_usd for row in model_rows if row.model == model), 0.0), 4),
                 credits=round(credits_by_model.get(model, 0.0), 2),
+                attributed_tokens=attributed_tokens_by_model.get(model, 0),
+                attributed_requests=attributed_requests_by_model.get(model, 0),
             )
             for model in all_models
         ]
@@ -291,7 +291,7 @@ class ReportsService:
                 if metric == "cost":
                     bucket_values[row.model] = row.cost_usd
                 else:
-                    bucket_values[row.model] = row.input_tokens + row.output_tokens + row.cached_input_tokens
+                    bucket_values[row.model] = row.input_tokens + row.output_tokens
 
         series = [
             UsageSeriesBucket(
@@ -321,6 +321,7 @@ class ReportsService:
                 total_cost_usd=round(total_cost_usd, 4),
                 total_credits=round(total_credits, 2),
                 attributed_requests=attributed_requests,
+                total_attributed_tokens=sum(attributed_tokens_by_model.values()),
             ),
             by_model=by_model,
             series=series,

@@ -56,12 +56,18 @@ class TestDeltaPercentToCredits:
 
 class TestRequestTokenWeight:
     def test_output_tokens_prefer_reasoning_fallback(self) -> None:
-        assert request_token_weight(100, 50, 80, 10) == 160
-        assert request_token_weight(100, None, 80, 10) == 190
+        assert request_token_weight(100, 50, 80, 10) == 150
+        assert request_token_weight(100, None, 80, 10) == 180
 
     def test_nulls_count_as_zero(self) -> None:
         assert request_token_weight(None, None, None, None) == 0
         assert request_token_weight(None, 40, None, None) == 40
+
+    def test_cached_tokens_do_not_add_weight(self) -> None:
+        # Cached input is already counted inside input_tokens; adding it again
+        # would double-count the cached share of the footprint.
+        assert request_token_weight(100, 50, 80, 10) == request_token_weight(100, 50, 80, 0) == 150
+        assert request_token_weight(100, 50, 80, 83) == 150
 
 
 class TestSplitCredits:

@@ -86,6 +86,7 @@ class UsageStatsSummary(DashboardModel):
     total_cost_usd: float = 0.0
     total_credits: float = 0.0
     attributed_requests: int = 0
+    total_attributed_tokens: int = 0
 
 
 class UsageModelEntry(DashboardModel):
@@ -98,6 +99,8 @@ class UsageModelEntry(DashboardModel):
     percentage: float
     cost_usd: float = 0.0
     credits: float = 0.0
+    attributed_tokens: int = 0
+    attributed_requests: int = 0
 
 
 class UsageSeriesBucket(DashboardModel):

@@ -10,21 +10,9 @@ import {
 } from "@/components/lazy-recharts";
 import { ChartTooltip } from "@/features/reports/components/chart-tooltip";
 import { formatCompactNumber } from "@/utils/formatters";
-import { MAX_VISIBLE_SERIES, OTHER_SERIES_KEY } from "./usage-stats-constants";
+import { MAX_VISIBLE_SERIES, OTHER_SERIES_KEY, USAGE_CHART_COLORS } from "./usage-stats-constants";
 
-const SERIES_COLORS: readonly string[] = [
-  "#3b82f6",
-  "#10b981",
-  "#f59e0b",
-  "#ec4899",
-  "#8b5cf6",
-  "#06b6d4",
-  "#84cc16",
-  "#f97316",
-  // Fallbacks once MAX_VISIBLE_SERIES exceeds the palette above.
-  "#6366f1",
-  "#14b8a6",
-].slice(0, MAX_VISIBLE_SERIES);
+const SERIES_COLORS: readonly string[] = USAGE_CHART_COLORS.slice(0, MAX_VISIBLE_SERIES);
 
 const OTHER_SERIES_COLOR = "#94a3b8";
 

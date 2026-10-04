@@ -116,8 +116,9 @@ async def test_usage_stats_api_returns_hourly_model_series_for_today(async_clien
     assert series[0]["bucket"] == "2026-06-12T00"
     assert series[0]["label"] == "00:00"
     assert series[10]["bucket"] == "2026-06-12T10"
-    # gpt-astra at 10:00 UTC: (1000+200+300) + (100+20+30) = 1650 tokens.
-    assert series[10]["values"] == {"gpt-astra": 1650}
+    # gpt-astra at 10:00 UTC: (1000+200) + (100+20) = 1320 tokens. Cached
+    # tokens are a subset of input and are NOT added to token totals.
+    assert series[10]["values"] == {"gpt-astra": 1320}
     assert series[11]["values"] == {"gpt-sol": 60}
     assert series[12]["values"] == {"unknown": 10}
     # Buckets without traffic stay present but empty.
@@ -129,15 +130,20 @@ async def test_usage_stats_api_returns_hourly_model_series_for_today(async_clien
     assert summary["totalInputTokens"] == 1157
     assert summary["totalOutputTokens"] == 233
     assert summary["totalCachedTokens"] == 330
-    assert summary["totalTokens"] == 1720
+    # Token totals count input + output only (cached would double-count).
+    assert summary["totalTokens"] == summary["totalInputTokens"] + summary["totalOutputTokens"]
+    assert summary["totalTokens"] == 1390
     assert summary["modelCount"] == 3
-    assert summary["avgTokensPerDay"] == 1720.0
+    assert summary["avgTokensPerDay"] == 1390.0
+    assert summary["totalAttributedTokens"] == 0
 
     by_model = payload["byModel"]
     assert [entry["model"] for entry in by_model] == ["gpt-astra", "gpt-sol", "unknown"]
-    assert by_model[0]["totalTokens"] == 1650
-    assert by_model[0]["percentage"] == 95.9
+    assert by_model[0]["totalTokens"] == 1320
+    assert by_model[0]["percentage"] == 95.0
     assert by_model[0]["requests"] == 2
+    assert by_model[0]["attributedTokens"] == 0
+    assert by_model[0]["attributedRequests"] == 0
     assert by_model[2]["model"] == "unknown"
     assert by_model[2]["totalTokens"] == 10
 
@@ -202,9 +208,10 @@ async def test_usage_stats_api_returns_daily_series_for_7d(async_client, db_setu
     assert series[0]["bucket"] == "2026-06-06"
     assert series[0]["label"] == "06-06"
     assert series[0]["values"] == {"gpt-sol": 15}
-    assert series[6]["values"] == {"gpt-astra": 30}
-    assert payload["summary"]["totalTokens"] == 45
-    assert payload["summary"]["avgTokensPerDay"] == 6.4
+    # 20 input + 8 output; the 2 cached tokens are inside the input count.
+    assert series[6]["values"] == {"gpt-astra": 28}
+    assert payload["summary"]["totalTokens"] == 43
+    assert payload["summary"]["avgTokensPerDay"] == 6.1
 
 
 async def test_usage_stats_api_interprets_today_in_requested_timezone(async_client, db_setup, monkeypatch):
@@ -344,6 +351,13 @@ async def test_usage_stats_api_cost_and_credits_metrics(async_client, db_setup, 
     assert [entry["model"] for entry in payload["byModel"]] == ["gpt-astra", "gpt-sol"]
     assert payload["byModel"][0]["percentage"] == 96.3
     assert payload["series"][10]["values"] == {"gpt-astra": 7.75, "gpt-sol": 0.3}
+    # Attributed token sums ride along regardless of the selected metric:
+    # astra 1,000,000 in + 100,000 out; sol 100,000 in + 10,000 out.
+    assert payload["summary"]["totalAttributedTokens"] == 1_210_000
+    assert payload["byModel"][0]["attributedTokens"] == 1_100_000
+    assert payload["byModel"][0]["attributedRequests"] == 1
+    assert payload["byModel"][1]["attributedTokens"] == 110_000
+    assert payload["byModel"][1]["attributedRequests"] == 1
 
     response = await async_client.get(
         "/api/reports/usage-stats",
@@ -354,8 +368,11 @@ async def test_usage_stats_api_cost_and_credits_metrics(async_client, db_setup, 
     assert payload["metric"] == "credits"
     assert payload["summary"]["totalCredits"] == 36.0
     assert payload["summary"]["attributedRequests"] == 2
+    assert payload["summary"]["totalAttributedTokens"] == 1_210_000
     assert payload["byModel"][0]["credits"] == 30.0
     assert payload["byModel"][0]["percentage"] == 83.3
+    assert payload["byModel"][0]["attributedTokens"] == 1_100_000
+    assert payload["byModel"][0]["attributedRequests"] == 1
     assert payload["series"][10]["values"] == {"gpt-astra": 30.0, "gpt-sol": 6.0}
 
     response = await async_client.get(

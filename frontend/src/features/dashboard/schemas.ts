@@ -284,6 +284,7 @@ const UsageStatsSummarySchema = z.object({
   totalCostUsd: z.number().optional().default(0),
   totalCredits: z.number().optional().default(0),
   attributedRequests: z.number().optional().default(0),
+  totalAttributedTokens: z.number().optional().default(0),
 });
 
 const UsageModelEntrySchema = z.object({
@@ -296,6 +297,8 @@ const UsageModelEntrySchema = z.object({
   percentage: z.number(),
   costUsd: z.number().optional().default(0),
   credits: z.number().optional().default(0),
+  attributedTokens: z.number().optional().default(0),
+  attributedRequests: z.number().optional().default(0),
 });
 
 const UsageSeriesBucketSchema = z.object({

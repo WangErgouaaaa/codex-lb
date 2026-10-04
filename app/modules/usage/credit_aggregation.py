@@ -22,6 +22,8 @@ class CreditModelAggregateRow:
     model: str
     credits_sum: float
     request_count: int
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -53,11 +55,16 @@ class CreditAttributionRepository:
     ) -> list[CreditModelAggregateRow]:
         _validate_window(window)
         model_bucket = _credit_model_bucket_expr()
+        # Attributed token sums mirror the reports module's semantics: output
+        # falls back to reasoning, cached stays a subset of input (never added).
+        attributed_output_tokens = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
         stmt = (
             select(
                 model_bucket.label("model"),
                 func.coalesce(func.sum(RequestCreditAttribution.credits), 0.0).label("credits_sum"),
                 func.count().label("request_count"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(attributed_output_tokens), 0).label("output_tokens"),
             )
             .select_from(RequestCreditAttribution)
             .join(RequestLog, RequestCreditAttribution.request_log_id == RequestLog.id)
@@ -76,6 +83,8 @@ class CreditAttributionRepository:
                 model=row.model,
                 credits_sum=float(row.credits_sum),
                 request_count=int(row.request_count),
+                input_tokens=int(row.input_tokens or 0),
+                output_tokens=int(row.output_tokens or 0),
             )
             for row in result.all()
         ]

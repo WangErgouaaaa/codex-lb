@@ -46,6 +46,8 @@ async def _seed_traffic(db_setup) -> dict[str, int]:
             model="gpt-astra",
             status="success",
             input_tokens=100,
+            output_tokens=40,
+            cached_input_tokens=25,
         )
         warmup = RequestLog(
             account_id="acc_credit_agg",
@@ -63,6 +65,9 @@ async def _seed_traffic(db_setup) -> dict[str, int]:
             model="",
             status="success",
             input_tokens=10,
+            # No output count: the attributed output sum falls back to
+            # reasoning tokens, mirroring the reports module's semantics.
+            reasoning_tokens=50,
         )
         session.add_all([normal, warmup, blank_model])
         await session.commit()
@@ -130,6 +135,15 @@ async def test_aggregate_credits_by_model_excludes_warmup_and_filters_window(db_
     assert [(row.model, row.credits_sum, row.request_count) for row in secondary_rows] == [
         ("gpt-astra", pytest.approx(7.0), 1)
     ]
+
+    # Attributed token sums follow the same filters: warmup is excluded, the
+    # blank model lands on "unknown", cached stays inside input (not added),
+    # and a missing output count falls back to reasoning tokens.
+    assert [(row.model, row.input_tokens, row.output_tokens) for row in primary_rows] == [
+        ("gpt-astra", 100, 40),
+        ("unknown", 10, 50),
+    ]
+    assert [(row.model, row.input_tokens, row.output_tokens) for row in secondary_rows] == [("gpt-astra", 100, 40)]
 
 
 async def test_aggregate_credits_by_model_bucket_keeps_empty_buckets(db_setup) -> None:

@@ -159,20 +159,22 @@ async def test_get_usage_stats_assembles_model_breakdown_and_series(monkeypatch:
     result = await service.get_usage_stats(range_key="today", report_timezone="UTC")
 
     # Artificial zero-fill rows for empty buckets must not leak as a model.
-    assert result.series[10].values == {"gpt-x": 75}
+    assert result.series[10].values == {"gpt-x": 70}
     assert all("unknown" not in bucket.values for bucket in result.series)
 
     # byModel keeps repository order (total tokens desc) and computes shares.
     assert [entry.model for entry in result.by_model] == ["gpt-x", "gpt-y"]
-    assert result.by_model[0].total_tokens == 118
-    assert result.by_model[0].percentage == 78.7  # 118 / 150
-    assert result.by_model[1].percentage == 21.3  # 32 / 150
+    assert result.by_model[0].total_tokens == 110
+    assert result.by_model[0].percentage == 78.6  # 110 / 140
+    assert result.by_model[1].percentage == 21.4  # 30 / 140
 
-    # Summary totals combine input + output + cached.
-    assert result.summary.total_tokens == 150
+    # Summary totals count input + output only: cached tokens are a subset of
+    # input, so adding them would inflate the total.
+    assert result.summary.total_tokens == result.summary.total_input_tokens + result.summary.total_output_tokens
+    assert result.summary.total_tokens == 140
     assert result.summary.total_requests == 7
     assert result.summary.model_count == 2
-    assert result.summary.avg_tokens_per_day == 150.0
+    assert result.summary.avg_tokens_per_day == 140.0
 
 
 @pytest.mark.asyncio
@@ -242,8 +244,12 @@ async def test_get_usage_stats_credits_metric_uses_attributed_credits(monkeypatc
     repo = _make_repo()
     credit_repo = _make_credit_repo(
         model_rows=[
-            CreditModelAggregateRow(model="gpt-x", credits_sum=12.5, request_count=3),
-            CreditModelAggregateRow(model="gpt-y", credits_sum=2.5, request_count=1),
+            CreditModelAggregateRow(
+                model="gpt-x", credits_sum=12.5, request_count=3, input_tokens=800, output_tokens=300
+            ),
+            CreditModelAggregateRow(
+                model="gpt-y", credits_sum=2.5, request_count=1, input_tokens=200, output_tokens=100
+            ),
         ],
         bucket_rows=[
             CreditModelBucketRow(
@@ -266,9 +272,15 @@ async def test_get_usage_stats_credits_metric_uses_attributed_credits(monkeypatc
     assert [entry.model for entry in result.by_model] == ["gpt-x", "gpt-y"]
     assert result.by_model[0].credits == 12.5
     assert result.by_model[0].percentage == 83.3  # 12.5 / 15.0
+    # Attributed token sums come from the credit rows (input + output).
+    assert result.by_model[0].attributed_tokens == 1100
+    assert result.by_model[0].attributed_requests == 3
+    assert result.by_model[1].attributed_tokens == 300
+    assert result.by_model[1].attributed_requests == 1
     assert result.series[10].values == {"gpt-x": 12.5}
     assert result.summary.total_credits == 15.0
     assert result.summary.attributed_requests == 4
+    assert result.summary.total_attributed_tokens == 1400
 
 
 @pytest.mark.asyncio
@@ -284,6 +296,8 @@ async def test_get_usage_stats_credits_without_credit_repository_returns_zeros(
 
     assert result.summary.total_credits == 0.0
     assert result.summary.attributed_requests == 0
+    assert result.summary.total_attributed_tokens == 0
+    assert all(entry.attributed_tokens == 0 and entry.attributed_requests == 0 for entry in result.by_model)
     assert all(not bucket.values for bucket in result.series)
 
 

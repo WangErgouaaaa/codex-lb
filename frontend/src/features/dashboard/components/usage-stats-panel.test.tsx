@@ -12,6 +12,7 @@ vi.mock("@/features/dashboard/hooks/use-usage-stats", () => ({
 }));
 
 let capturedChartProps: { data?: Array<Record<string, unknown>> } | null = null;
+let capturedUnitPriceProps: { data?: Array<Record<string, unknown>> } | null = null;
 let capturedBars: Array<{ dataKey?: string; stackId?: string }> = [];
 let capturedLegendFormatter: ((value: unknown) => string) | null = null;
 
@@ -21,7 +22,15 @@ vi.mock("@/components/lazy-recharts", async (importOriginal) => {
   return {
     ...actual,
     ResponsiveContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-    BarChart: (props: { children: ReactNode; data?: Array<Record<string, unknown>> }) => {
+    BarChart: (props: {
+      children: ReactNode;
+      data?: Array<Record<string, unknown>>;
+      layout?: string;
+    }) => {
+      if (props.layout === "vertical") {
+        capturedUnitPriceProps = props;
+        return <div data-testid="usage-stats-unitprice-chart">{props.children}</div>;
+      }
       capturedChartProps = props;
       return <div data-testid="usage-bar-chart">{props.children}</div>;
     },
@@ -29,6 +38,7 @@ vi.mock("@/components/lazy-recharts", async (importOriginal) => {
       capturedBars.push(props);
       return null;
     },
+    Cell: () => null,
     XAxis: () => null,
     YAxis: () => null,
     CartesianGrid: () => null,
@@ -51,17 +61,19 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
     endDate: "2026-10-01",
     metric: "tokens",
     summary: {
-      totalTokens: 1_234_567,
+      // totalTokens is input + output; cached tokens are a subset of input.
+      totalTokens: 1_200_000,
       totalInputTokens: 1_000_000,
       totalOutputTokens: 200_000,
       totalCachedTokens: 34_567,
       totalRequests: 42,
       totalErrors: 2,
       modelCount: 2,
-      avgTokensPerDay: 1_234_567,
+      avgTokensPerDay: 1_200_000,
       totalCostUsd: 8.05,
       totalCredits: 36.0,
-      attributedRequests: 10,
+      attributedRequests: 55,
+      totalAttributedTokens: 1_150_000,
     },
     byModel: [
       {
@@ -70,10 +82,12 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
         inputTokens: 900_000,
         outputTokens: 150_000,
         cachedInputTokens: 30_000,
-        totalTokens: 1_080_000,
+        totalTokens: 1_050_000,
         percentage: 87.5,
         costUsd: 7.75,
         credits: 30.0,
+        attributedTokens: 1_000_000,
+        attributedRequests: 30,
       },
       {
         model: "gpt-sol",
@@ -81,15 +95,17 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
         inputTokens: 100_000,
         outputTokens: 50_000,
         cachedInputTokens: 4_567,
-        totalTokens: 154_567,
+        totalTokens: 150_000,
         percentage: 12.5,
         costUsd: 0.3,
         credits: 6.0,
+        attributedTokens: 150_000,
+        attributedRequests: 25,
       },
     ],
     series: [
-      { bucket: "2026-10-01T09", label: "09:00", values: { "gpt-astra": 500_000, "gpt-sol": 100_000 } },
-      { bucket: "2026-10-01T10", label: "10:00", values: { "gpt-astra": 580_000, "gpt-sol": 54_567 } },
+      { bucket: "2026-10-01T09", label: "09:00", values: { "gpt-astra": 450_000, "gpt-sol": 60_000 } },
+      { bucket: "2026-10-01T10", label: "10:00", values: { "gpt-astra": 600_000, "gpt-sol": 90_000 } },
     ],
     ...overrides,
   } as UsageStatsResponse;
@@ -108,6 +124,7 @@ function mockQueryData(data: UsageStatsResponse | undefined) {
 describe("UsageStatsPanel", () => {
   beforeEach(() => {
     capturedChartProps = null;
+    capturedUnitPriceProps = null;
     capturedBars = [];
     capturedLegendFormatter = null;
     useUsageStatsMock.mockReset();
@@ -135,8 +152,8 @@ describe("UsageStatsPanel", () => {
 
     // Chart rows keep bucket labels and per-model values for stacking.
     expect(capturedChartProps?.data).toEqual([
-      { label: "09:00", "gpt-astra": 500_000, "gpt-sol": 100_000 },
-      { label: "10:00", "gpt-astra": 580_000, "gpt-sol": 54_567 },
+      { label: "09:00", "gpt-astra": 450_000, "gpt-sol": 60_000 },
+      { label: "10:00", "gpt-astra": 600_000, "gpt-sol": 90_000 },
     ]);
     expect(capturedBars.map((bar) => bar.dataKey)).toEqual(["gpt-astra", "gpt-sol"]);
     expect(capturedBars.every((bar) => bar.stackId === "usage")).toBe(true);
@@ -162,6 +179,8 @@ describe("UsageStatsPanel", () => {
           percentage: 10,
           costUsd: 0.1,
           credits: 1.5,
+          attributedTokens: 1_000,
+          attributedRequests: 5,
         })),
         series: [{ bucket: "2026-10-01", label: "10-01", values }],
       }),
@@ -233,6 +252,7 @@ describe("UsageStatsPanel", () => {
           totalCostUsd: 0,
           totalCredits: 0,
           attributedRequests: 0,
+          totalAttributedTokens: 0,
         },
         byModel: [],
         series: [{ bucket: "2026-10-01T00", label: "00:00", values: {} }],
@@ -244,5 +264,88 @@ describe("UsageStatsPanel", () => {
     expect(await screen.findByText("No usage data in the selected range")).toBeInTheDocument();
     expect(screen.queryByTestId("usage-bar-chart")).not.toBeInTheDocument();
     expect(screen.queryByTestId("usage-stats-table-scroll")).not.toBeInTheDocument();
+  });
+
+  it("fetches credits and renders the unit price view when the toggle is clicked", async () => {
+    mockQueryData(makeResponse({ metric: "credits" }));
+    const user = userEvent.setup();
+
+    render(<UsageStatsPanel />);
+    expect(await screen.findByTestId("usage-bar-chart")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Unit price (real)" }));
+
+    // The unitprice view is a frontend view served by the credits metric.
+    expect(useUsageStatsMock).toHaveBeenLastCalledWith("today", "credits", expect.anything());
+    expect(await screen.findByTestId("usage-stats-unitprice-chart")).toBeInTheDocument();
+    expect(screen.queryByTestId("usage-bar-chart")).not.toBeInTheDocument();
+
+    expect(screen.getByText("Real unit price by model (credits / 1M tokens)")).toBeInTheDocument();
+    // The "total consumption" line is meaningless for a ratio view.
+    expect(screen.queryByText(/Total consumption/)).not.toBeInTheDocument();
+
+    // Cards: credits / 1M tokens (36 / 1.15M * 1M = 31.3) and credits per
+    // request (36 / 55 = 0.7).
+    expect(screen.getByText("Credits / 1M tokens")).toBeInTheDocument();
+    expect(screen.getByText("31.3")).toBeInTheDocument();
+    expect(screen.getByText("Credits / request")).toBeInTheDocument();
+    expect(screen.getByText("0.7")).toBeInTheDocument();
+  });
+
+  it("hides ratios below the sample guard and excludes those models from the chart", async () => {
+    const base = makeResponse();
+    const astra = base.byModel[0];
+    const sol = base.byModel[1];
+    mockQueryData(
+      makeResponse({
+        metric: "credits",
+        byModel: [
+          { ...sol, attributedRequests: 7 }, // below MIN_RATIO_SAMPLE_REQUESTS
+          astra,
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<UsageStatsPanel />);
+    await screen.findByTestId("usage-bar-chart");
+
+    await user.click(screen.getByRole("button", { name: "Unit price (real)" }));
+    expect(await screen.findByTestId("usage-stats-unitprice-chart")).toBeInTheDocument();
+
+    // gpt-sol fails the guard: dash subtext instead of a ratio, while
+    // gpt-astra still shows its sampled ratio.
+    const solRow = screen.getByTestId("usage-stats-row-gpt-sol");
+    expect(solRow.textContent).toContain("—");
+    expect(solRow.textContent).not.toContain("40.0/1M");
+    expect(screen.getByTestId("usage-stats-row-gpt-astra").textContent).toContain("30.0/1M · n=30");
+
+    // Only guarded models are charted.
+    expect(capturedUnitPriceProps?.data?.map((row) => String(row.name))).toEqual(["gpt-astra"]);
+
+    // Guarded rows float to the top of the table in the unitprice view even
+    // though the server order lists gpt-sol first.
+    const rowIds = screen
+      .getAllByTestId(/^usage-stats-row-/)
+      .map((row) => row.getAttribute("data-testid"));
+    expect(rowIds).toEqual(["usage-stats-row-gpt-astra", "usage-stats-row-gpt-sol"]);
+  });
+
+  it("orders the unit price chart with the cheapest model on top", async () => {
+    mockQueryData(makeResponse({ metric: "credits" })); // gpt-astra 30.0 < gpt-sol 40.0
+    const user = userEvent.setup();
+
+    render(<UsageStatsPanel />);
+    await screen.findByTestId("usage-bar-chart");
+
+    await user.click(screen.getByRole("button", { name: "Unit price (real)" }));
+    expect(await screen.findByTestId("usage-stats-unitprice-chart")).toBeInTheDocument();
+
+    // A recharts vertical category axis lists the first data entry at the
+    // bottom, so the cheapest model must be the last row to sit on top.
+    expect(capturedUnitPriceProps?.data?.map((row) => String(row.name))).toEqual([
+      "gpt-sol",
+      "gpt-astra",
+    ]);
   });
 });

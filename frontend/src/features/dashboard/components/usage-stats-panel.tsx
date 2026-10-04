@@ -425,7 +425,7 @@ export function UsageStatsPanel() {
                 data-testid="usage-stats-table-scroll"
                 className="mt-4 max-h-[17.5rem] overflow-x-auto overflow-y-auto"
               >
-                <table className="w-full table-fixed text-xs min-w-[840px]">
+                <table className="w-full table-fixed text-sm min-w-[920px]">
                   <colgroup>
                     <col style={{ width: "24%" }} />
                     <col style={{ width: "8%" }} />
@@ -470,7 +470,7 @@ export function UsageStatsPanel() {
                         <td className="py-2.5 pr-4 text-right font-medium text-foreground">{formatCompactNumber(entry.totalTokens)}</td>
                         <td className="py-2.5 pr-4 text-right font-medium text-foreground">
                           <span>{entry.credits > 0 ? formatCompactNumber(entry.credits) : "—"}</span>
-                          <div className="text-[11px] text-muted-foreground">
+                          <div className="text-xs text-muted-foreground">
                             {isUsageRatioDisplayable(entry)
                               ? `${usageUnitPriceRatio(entry).toFixed(1)}/1M · n=${entry.attributedRequests}`
                               : "—"}
@@ -527,5 +527,5 @@ function CachedRate({ rate }: { rate: number | null }) {
   if (rate === null) {
     return null;
   }
-  return <span className="text-[11px] text-muted-foreground">({rate}%)</span>;
+  return <span className="text-xs text-muted-foreground">({rate}%)</span>;
 }

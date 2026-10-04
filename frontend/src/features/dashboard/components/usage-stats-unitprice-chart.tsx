@@ -37,7 +37,7 @@ export function UsageStatsUnitPriceChart({ rows }: UsageStatsUnitPriceChartProps
           <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" horizontal={false} />
           <XAxis
             type="number"
-            tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
+            tick={{ fontSize: 12, fill: "var(--muted-foreground)" }}
             axisLine={false}
             tickLine={false}
             tickFormatter={(value: number) => value.toFixed(1)}
@@ -45,10 +45,10 @@ export function UsageStatsUnitPriceChart({ rows }: UsageStatsUnitPriceChartProps
           <YAxis
             type="category"
             dataKey="name"
-            tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
+            tick={{ fontSize: 12, fill: "var(--muted-foreground)" }}
             axisLine={false}
             tickLine={false}
-            width={130}
+            width={150}
           />
           <Tooltip
             cursor={{ fill: "hsl(var(--muted))", fillOpacity: 0.4 }}

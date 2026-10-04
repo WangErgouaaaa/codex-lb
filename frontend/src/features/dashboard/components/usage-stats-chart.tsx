@@ -35,18 +35,18 @@ export function UsageStatsChart({ rows, models, hasOther, names, formatValue }: 
           <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
           <XAxis
             dataKey="label"
-            tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
+            tick={{ fontSize: 12, fill: "var(--muted-foreground)" }}
             axisLine={false}
             tickLine={false}
             interval="preserveStartEnd"
-            minTickGap={14}
+            minTickGap={16}
           />
           <YAxis
-            tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
+            tick={{ fontSize: 12, fill: "var(--muted-foreground)" }}
             axisLine={false}
             tickLine={false}
             tickFormatter={(value: number) => format(value)}
-            width={46}
+            width={52}
           />
           <Tooltip
             cursor={{ fill: "hsl(var(--muted))", fillOpacity: 0.4 }}
@@ -59,8 +59,8 @@ export function UsageStatsChart({ rows, models, hasOther, names, formatValue }: 
           />
           <Legend
             iconType="circle"
-            iconSize={8}
-            wrapperStyle={{ fontSize: 11, paddingTop: 6 }}
+            iconSize={9}
+            wrapperStyle={{ fontSize: 12, paddingTop: 6 }}
             formatter={legendFormatter}
           />
           {models.map((model, index) => (

@@ -87,6 +87,7 @@ class UsageStatsSummary(DashboardModel):
     total_credits: float = 0.0
     attributed_requests: int = 0
     total_attributed_tokens: int = 0
+    total_primary_credits: float = 0.0
 
 
 class UsageModelEntry(DashboardModel):
@@ -109,6 +110,19 @@ class UsageSeriesBucket(DashboardModel):
     values: dict[str, float]
 
 
+class UsageWindowSeriesBucket(DashboardModel):
+    """Per-bucket attributed credits for each quota window.
+
+    ``primary`` is the 5-hour window and ``secondary`` the weekly window;
+    values are raw credits so clients can render share-of-range percentages.
+    """
+
+    bucket: str
+    label: str
+    primary_credits: float = 0.0
+    secondary_credits: float = 0.0
+
+
 class UsageStatsResponse(DashboardModel):
     range: str
     bucket: str
@@ -118,4 +132,5 @@ class UsageStatsResponse(DashboardModel):
     summary: UsageStatsSummary
     by_model: list[UsageModelEntry] = Field(default_factory=list)
     series: list[UsageSeriesBucket] = Field(default_factory=list)
+    window_series: list[UsageWindowSeriesBucket] = Field(default_factory=list)
     metric: str = "tokens"

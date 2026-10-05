@@ -13,7 +13,9 @@ vi.mock("@/features/dashboard/hooks/use-usage-stats", () => ({
 
 let capturedChartProps: { data?: Array<Record<string, unknown>> } | null = null;
 let capturedUnitPriceProps: { data?: Array<Record<string, unknown>> } | null = null;
+let capturedWindowProps: { data?: Array<Record<string, unknown>> } | null = null;
 let capturedBars: Array<{ dataKey?: string; stackId?: string }> = [];
+let capturedLines: Array<{ dataKey?: string }> = [];
 let capturedLegendFormatter: ((value: unknown) => string) | null = null;
 
 vi.mock("@/components/lazy-recharts", async (importOriginal) => {
@@ -36,6 +38,14 @@ vi.mock("@/components/lazy-recharts", async (importOriginal) => {
     },
     Bar: (props: { dataKey?: string; stackId?: string }) => {
       capturedBars.push(props);
+      return null;
+    },
+    LineChart: (props: { children: ReactNode; data?: Array<Record<string, unknown>> }) => {
+      capturedWindowProps = props;
+      return <div>{props.children}</div>;
+    },
+    Line: (props: { dataKey?: string }) => {
+      capturedLines.push(props);
       return null;
     },
     Cell: () => null,
@@ -74,6 +84,7 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
       totalCredits: 36.0,
       attributedRequests: 55,
       totalAttributedTokens: 1_150_000,
+      totalPrimaryCredits: 0,
     },
     byModel: [
       {
@@ -107,6 +118,7 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
       { bucket: "2026-10-01T09", label: "09:00", values: { "gpt-astra": 450_000, "gpt-sol": 60_000 } },
       { bucket: "2026-10-01T10", label: "10:00", values: { "gpt-astra": 600_000, "gpt-sol": 90_000 } },
     ],
+    windowSeries: [],
     ...overrides,
   } as UsageStatsResponse;
 }
@@ -125,7 +137,9 @@ describe("UsageStatsPanel", () => {
   beforeEach(() => {
     capturedChartProps = null;
     capturedUnitPriceProps = null;
+    capturedWindowProps = null;
     capturedBars = [];
+    capturedLines = [];
     capturedLegendFormatter = null;
     useUsageStatsMock.mockReset();
   });
@@ -253,6 +267,7 @@ describe("UsageStatsPanel", () => {
           totalCredits: 0,
           attributedRequests: 0,
           totalAttributedTokens: 0,
+          totalPrimaryCredits: 0,
         },
         byModel: [],
         series: [{ bucket: "2026-10-01T00", label: "00:00", values: {} }],
@@ -347,5 +362,48 @@ describe("UsageStatsPanel", () => {
       "gpt-sol",
       "gpt-astra",
     ]);
+  });
+  it("renders the window share view with both quota windows as percent lines", async () => {
+    mockQueryData(
+      makeResponse({
+        metric: "window_credits",
+        series: [
+          { bucket: "2026-10-01T09", label: "09:00", values: {} },
+          { bucket: "2026-10-01T10", label: "10:00", values: {} },
+        ],
+        windowSeries: [
+          { bucket: "2026-10-01T09", label: "09:00", primaryCredits: 30, secondaryCredits: 60 },
+          { bucket: "2026-10-01T10", label: "10:00", primaryCredits: 10, secondaryCredits: 20 },
+        ],
+        summary: { ...makeResponse().summary, totalPrimaryCredits: 40, totalCredits: 80 },
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<UsageStatsPanel />);
+    // The mocked response belongs to the window_credits metric, so the model
+    // series is empty and the initial tokens view shows its empty state.
+    expect(await screen.findByText("No usage data in the selected range")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Window share" }));
+    expect(useUsageStatsMock).toHaveBeenLastCalledWith("today", "window_credits", expect.anything());
+    expect(await screen.findByTestId("usage-stats-window-chart")).toBeInTheDocument();
+    expect(screen.queryByTestId("usage-bar-chart")).not.toBeInTheDocument();
+
+    // Each line is a share of its own window's range total: 30/40 = 75%,
+    // 60/80 = 75% in the first bucket and 25% in the second.
+    expect(capturedWindowProps?.data).toEqual([
+      { label: "09:00", primaryPercent: 75, secondaryPercent: 75, primaryCredits: 30, secondaryCredits: 60 },
+      { label: "10:00", primaryPercent: 25, secondaryPercent: 25, primaryCredits: 10, secondaryCredits: 20 },
+    ]);
+    expect(capturedLines.map((line) => line.dataKey)).toEqual(["primaryPercent", "secondaryPercent"]);
+
+    // Cards expose both window totals and the per-model table stays visible.
+    expect(screen.getByText("5-Hour Credits")).toBeInTheDocument();
+    expect(screen.getByText("Weekly Credits")).toBeInTheDocument();
+    expect(screen.getByTestId("usage-stats-row-gpt-astra")).toBeInTheDocument();
+    expect(
+      screen.getByText("Quota window consumption share (5-Hour vs Weekly, % of range total)"),
+    ).toBeInTheDocument();
   });
 });

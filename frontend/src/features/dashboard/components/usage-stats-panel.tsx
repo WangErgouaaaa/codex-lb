@@ -43,6 +43,15 @@ type UsageStatsUnitPriceChartProps = {
   rows: UsageUnitPriceRow[];
 };
 
+const UsageStatsWindowChart = lazy(() =>
+  import("./usage-stats-window-chart").then((module) => ({
+    default: (props: UsageStatsWindowChartProps) => <module.UsageStatsWindowChart {...props} />,
+  })),
+);
+type UsageStatsWindowChartProps = {
+  rows: import("./usage-stats-window-chart").UsageWindowRow[];
+};
+
 /** Frontend-only view; "unitprice" is served by the credits metric. */
 type UsageStatsView = UsageStatsMetric | "unitprice";
 
@@ -61,6 +70,7 @@ const USAGE_METRIC_OPTIONS: ReadonlyArray<{ value: UsageStatsView; labelKey: str
   { value: "credits", labelKey: "dashboard.usageStats.metric.credits" },
   { value: "cost", labelKey: "dashboard.usageStats.metric.cost" },
   { value: "unitprice", labelKey: "dashboard.usageStats.metric.unitprice" },
+  { value: "window_credits", labelKey: "dashboard.usageStats.metric.window_credits" },
 ];
 
 export function UsageStatsPanel() {
@@ -135,6 +145,26 @@ export function UsageStatsPanel() {
       .sort((left, right) => left.ratio - right.ratio);
   }, [data, seriesNames]);
 
+  // Window view rows: each bucket's 5h/weekly attributed credits as a share
+  // of that window's range total, so both lines normalize to 100%.
+  const windowChartData = useMemo(() => {
+    const buckets = data?.windowSeries ?? [];
+    const primaryTotal = buckets.reduce((sum, bucket) => sum + bucket.primaryCredits, 0);
+    const secondaryTotal = buckets.reduce((sum, bucket) => sum + bucket.secondaryCredits, 0);
+    const toPercent = (value: number, total: number) => (total > 0 ? (value / total) * 100 : 0);
+    return {
+      rows: buckets.map((bucket) => ({
+        label: bucket.label,
+        primaryPercent: toPercent(bucket.primaryCredits, primaryTotal),
+        secondaryPercent: toPercent(bucket.secondaryCredits, secondaryTotal),
+        primaryCredits: bucket.primaryCredits,
+        secondaryCredits: bucket.secondaryCredits,
+      })),
+      primaryTotal,
+      secondaryTotal,
+    };
+  }, [data]);
+
   // The unitprice view locally re-sorts the table: guarded models ascending
   // by ratio first, unguarded models afterwards in server order.
   const tableRows = useMemo(() => {
@@ -151,7 +181,11 @@ export function UsageStatsPanel() {
     return [...guarded, ...unguarded];
   }, [data, view]);
 
-  const isEmpty = !data || data.series.every((bucket) => Object.keys(bucket.values).length === 0);
+  const isEmpty =
+    !data ||
+    (view === "window_credits"
+      ? windowChartData.primaryTotal <= 0 && windowChartData.secondaryTotal <= 0
+      : data.series.every((bucket) => Object.keys(bucket.values).length === 0));
 
   const cachedShare =
     data && data.summary.totalTokens > 0
@@ -340,6 +374,41 @@ export function UsageStatsPanel() {
                   }
                 />
               </>
+            ) : view === "window_credits" ? (
+              <>
+                <StatCard
+                  label={t("dashboard.usage.fiveHourCredits")}
+                  value={formatCompactNumber(windowChartData.primaryTotal)}
+                  sub={t("dashboard.usageStats.stat.creditsNote")}
+                />
+                <StatCard
+                  label={t("dashboard.usage.weeklyCredits")}
+                  value={formatCompactNumber(windowChartData.secondaryTotal)}
+                  sub={t("dashboard.usageStats.stat.creditsNote")}
+                />
+                <StatCard
+                  label={t("dashboard.usageStats.stat.attributedRequests")}
+                  value={formatNumber(data.summary.attributedRequests)}
+                  sub={
+                    attributedShare != null
+                      ? t("dashboard.usageStats.stat.shareOfRequests", { percent: attributedShare })
+                      : undefined
+                  }
+                />
+                {data.bucket === "day" ? (
+                  <StatCard
+                    label={t("dashboard.usageStats.stat.avgCreditsPerDay")}
+                    value={formatCompactNumber(
+                      windowChartData.secondaryTotal / Math.max(1, windowChartData.rows.length),
+                    )}
+                  />
+                ) : (
+                  <StatCard
+                    label={t("dashboard.usageStats.stat.models")}
+                    value={formatNumber(data.summary.modelCount)}
+                  />
+                )}
+              </>
             ) : (
               <>
                 <StatCard
@@ -391,7 +460,13 @@ export function UsageStatsPanel() {
                           ? formatCurrency(data.summary.totalCostUsd)
                           : view === "credits"
                             ? formatCompactNumber(data.summary.totalCredits)
-                            : formatCompactNumber(data.summary.totalTokens)}
+                            : view === "window_credits"
+                              ? `${t("dashboard.usage.fiveHourCredits")} ${formatCompactNumber(
+                                  windowChartData.primaryTotal,
+                                )} · ${t("dashboard.usage.weeklyCredits")} ${formatCompactNumber(
+                                  windowChartData.secondaryTotal,
+                                )}`
+                              : formatCompactNumber(data.summary.totalTokens)}
                       </span>
                     </div>
                   ) : null}
@@ -407,6 +482,10 @@ export function UsageStatsPanel() {
                         {t("dashboard.usageStats.emptyCredits")}
                       </div>
                     )
+                  ) : view === "window_credits" ? (
+                    <Suspense fallback={<div className="h-[260px] rounded-lg bg-muted/30" />}>
+                      <UsageStatsWindowChart rows={windowChartData.rows} />
+                    </Suspense>
                   ) : (
                     <Suspense fallback={<div className="h-[260px] rounded-lg bg-muted/30" />}>
                       <UsageStatsChart

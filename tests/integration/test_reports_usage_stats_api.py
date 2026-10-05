@@ -380,3 +380,106 @@ async def test_usage_stats_api_cost_and_credits_metrics(async_client, db_setup, 
         params={"range": "today", "metric": "stars"},
     )
     assert response.status_code == 422
+async def test_usage_stats_window_credits_metric_builds_both_window_series(async_client, db_setup, monkeypatch):
+    from app.db.models import RequestCreditAttribution
+
+    fixed_now = datetime(2026, 6, 12, 15, 30, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.modules.reports.service.utcnow", lambda: fixed_now)
+    captured_at = _naive_utc(datetime(2026, 6, 12, 10, 30, 0, tzinfo=timezone.utc))
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_window_credits", "window-credits@example.com"))
+        astra_log = RequestLog(
+            account_id="acc_window_credits",
+            request_id="window-credits-astra",
+            requested_at=_naive_utc(datetime(2026, 6, 12, 10, 5, 0, tzinfo=timezone.utc)),
+            model="gpt-astra",
+            status="success",
+            input_tokens=500_000,
+            output_tokens=50_000,
+        )
+        sol_log = RequestLog(
+            account_id="acc_window_credits",
+            request_id="window-credits-sol",
+            requested_at=_naive_utc(datetime(2026, 6, 12, 11, 40, 0, tzinfo=timezone.utc)),
+            model="gpt-sol",
+            status="success",
+            input_tokens=200_000,
+            output_tokens=20_000,
+        )
+        session.add_all([astra_log, sol_log])
+        await session.flush()
+        session.add_all(
+            [
+                RequestCreditAttribution(
+                    request_log_id=astra_log.id,
+                    account_id="acc_window_credits",
+                    window="primary",
+                    credits=12.0,
+                    snapshot_id=1,
+                    attributed_at=captured_at,
+                ),
+                RequestCreditAttribution(
+                    request_log_id=astra_log.id,
+                    account_id="acc_window_credits",
+                    window="secondary",
+                    credits=24.0,
+                    snapshot_id=1,
+                    attributed_at=captured_at,
+                ),
+                RequestCreditAttribution(
+                    request_log_id=sol_log.id,
+                    account_id="acc_window_credits",
+                    window="primary",
+                    credits=18.0,
+                    snapshot_id=2,
+                    attributed_at=captured_at,
+                ),
+                RequestCreditAttribution(
+                    request_log_id=sol_log.id,
+                    account_id="acc_window_credits",
+                    window="secondary",
+                    credits=48.0,
+                    snapshot_id=2,
+                    attributed_at=captured_at,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports/usage-stats",
+        params={"range": "today", "timezone": "UTC", "metric": "window_credits"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["metric"] == "window_credits"
+    # 24 hourly buckets, both windows reported as raw credits per bucket.
+    assert len(payload["windowSeries"]) == 24
+    assert payload["windowSeries"][10] == {
+        "bucket": "2026-06-12T10",
+        "label": "10:00",
+        "primaryCredits": 12.0,
+        "secondaryCredits": 24.0,
+    }
+    assert payload["windowSeries"][11] == {
+        "bucket": "2026-06-12T11",
+        "label": "11:00",
+        "primaryCredits": 18.0,
+        "secondaryCredits": 48.0,
+    }
+    assert payload["windowSeries"][0]["primaryCredits"] == 0.0
+    assert payload["summary"]["totalPrimaryCredits"] == 30.0
+    assert payload["summary"]["totalCredits"] == 72.0
+    # The model series stays empty; the window chart reads windowSeries instead.
+    assert all(bucket["values"] == {} for bucket in payload["series"])
+    # Table semantics follow the credits metric: secondary-window ordering.
+    assert [entry["model"] for entry in payload["byModel"]] == ["gpt-sol", "gpt-astra"]
+    assert payload["byModel"][0]["percentage"] == 66.7
+
+    # Other metrics keep the response lean: no window series computed.
+    response = await async_client.get(
+        "/api/reports/usage-stats",
+        params={"range": "today", "timezone": "UTC", "metric": "tokens"},
+    )
+    assert response.status_code == 200
+    assert response.json()["windowSeries"] == []

@@ -25,6 +25,7 @@ from app.modules.reports.schemas import (
     UsageSeriesBucket,
     UsageStatsResponse,
     UsageStatsSummary,
+    UsageWindowSeriesBucket,
     UserAgentCostEntry,
 )
 from app.modules.usage.credit_aggregation import CreditAttributionRepository
@@ -35,9 +36,11 @@ class InvalidReportDateRangeError(ValueError):
 
 
 USAGE_STATS_RANGES = ("today", "7d", "30d")
-USAGE_STATS_METRICS = ("tokens", "cost", "credits")
+USAGE_STATS_METRICS = ("tokens", "cost", "credits", "window_credits")
 # Credits are read from the weekly window: it is the real subscription budget.
 CREDITS_WINDOW = "secondary"
+# The window_credits metric charts both quota windows as share-of-range lines.
+WINDOW_CREDITS_SERIES_WINDOWS = ("primary", "secondary")
 
 
 class ReportsService:
@@ -209,7 +212,13 @@ class ReportsService:
         summary = await self._repository.aggregate_summary(start_at, end_at)
         model_rows = await self._repository.aggregate_usage_by_model(start_at, end_at)
         bucket_ranges = build_usage_bucket_ranges(start_date, end_date, timezone_info, bucket)
-        series_rows = await self._repository.aggregate_usage_by_model_bucket(bucket_ranges)
+        # The window_credits view charts per-window bucket series instead of
+        # per-model ones, so the model bucket query is skipped for it.
+        series_rows = (
+            []
+            if metric == "window_credits"
+            else await self._repository.aggregate_usage_by_model_bucket(bucket_ranges)
+        )
 
         # Real subscription credit consumption (weekly window = the actual
         # budget), attributed from account usage-window snapshot deltas.
@@ -219,6 +228,8 @@ class ReportsService:
         attributed_tokens_by_model: dict[str, int] = {}
         attributed_requests_by_model: dict[str, int] = {}
         credit_bucket_rows = []
+        window_series: list[UsageWindowSeriesBucket] = []
+        total_primary_credits = 0.0
         if self._credit_repository is not None:
             credit_rows = await self._credit_repository.aggregate_credits_by_model(start_at, end_at, CREDITS_WINDOW)
             credits_by_model = {row.model: row.credits_sum for row in credit_rows}
@@ -226,9 +237,12 @@ class ReportsService:
             attributed_requests = sum(row.request_count for row in credit_rows)
             attributed_tokens_by_model = {row.model: row.input_tokens + row.output_tokens for row in credit_rows}
             attributed_requests_by_model = {row.model: row.request_count for row in credit_rows}
-            credit_bucket_rows = await self._credit_repository.aggregate_credits_by_model_bucket(
-                bucket_ranges, CREDITS_WINDOW
-            )
+            if metric == "window_credits":
+                window_series, total_primary_credits = await self._build_window_series(bucket_ranges)
+            else:
+                credit_bucket_rows = await self._credit_repository.aggregate_credits_by_model_bucket(
+                    bucket_ranges, CREDITS_WINDOW
+                )
 
         # cached_input_tokens is a subset of input_tokens, so token totals
         # count input + output only — adding cached would double-count it.
@@ -240,13 +254,14 @@ class ReportsService:
             "tokens": total_tokens,
             "cost": total_cost_usd,
             "credits": total_credits,
+            "window_credits": total_credits,
         }
         metric_total = metric_totals[metric]
 
         def metric_value(model: str) -> float:
             if metric == "cost":
                 return next((row.cost_usd for row in model_rows if row.model == model), 0.0)
-            if metric == "credits":
+            if metric in ("credits", "window_credits"):
                 return credits_by_model.get(model, 0.0)
             return next(
                 (row.input_tokens + row.output_tokens for row in model_rows if row.model == model),
@@ -320,13 +335,39 @@ class ReportsService:
                 avg_tokens_per_day=round(total_tokens / window_days, 1) if total_tokens > 0 else 0.0,
                 total_cost_usd=round(total_cost_usd, 4),
                 total_credits=round(total_credits, 2),
+                total_primary_credits=round(total_primary_credits, 2),
                 attributed_requests=attributed_requests,
                 total_attributed_tokens=sum(attributed_tokens_by_model.values()),
             ),
             by_model=by_model,
             series=series,
+            window_series=window_series,
             metric=metric,
         )
+
+    async def _build_window_series(
+        self,
+        bucket_ranges: list[tuple[str, str, datetime, datetime]],
+    ) -> tuple[list[UsageWindowSeriesBucket], float]:
+        """Build per-bucket attributed credits for the 5h and weekly windows."""
+        assert self._credit_repository is not None  # guarded by the caller
+        credits_by_bucket: dict[str, dict[str, float]] = {window: {} for window in WINDOW_CREDITS_SERIES_WINDOWS}
+        for window in WINDOW_CREDITS_SERIES_WINDOWS:
+            rows = await self._credit_repository.aggregate_credits_by_model_bucket(bucket_ranges, window)
+            for row in rows:
+                bucket_totals = credits_by_bucket[window]
+                bucket_totals[row.bucket_key] = bucket_totals.get(row.bucket_key, 0.0) + row.credits_sum
+        series = [
+            UsageWindowSeriesBucket(
+                bucket=bucket_key,
+                label=bucket_label,
+                primary_credits=round(credits_by_bucket["primary"].get(bucket_key, 0.0), 2),
+                secondary_credits=round(credits_by_bucket["secondary"].get(bucket_key, 0.0), 2),
+            )
+            for bucket_key, bucket_label, _bucket_start, _bucket_end in bucket_ranges
+        ]
+        total_primary = sum(bucket.primary_credits for bucket in series)
+        return series, total_primary
 
 
 def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:

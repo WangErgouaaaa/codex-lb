@@ -263,7 +263,7 @@ export const UsageStatsRangeSchema = z.enum(["today", "7d", "30d"]);
 export type UsageStatsRange = z.infer<typeof UsageStatsRangeSchema>;
 export const DEFAULT_USAGE_STATS_RANGE: UsageStatsRange = "today";
 
-export const UsageStatsMetricSchema = z.enum(["tokens", "credits", "cost"]);
+export const UsageStatsMetricSchema = z.enum(["tokens", "credits", "cost", "window_credits"]);
 export type UsageStatsMetric = z.infer<typeof UsageStatsMetricSchema>;
 export const DEFAULT_USAGE_STATS_METRIC: UsageStatsMetric = "tokens";
 
@@ -285,6 +285,7 @@ const UsageStatsSummarySchema = z.object({
   totalCredits: z.number().optional().default(0),
   attributedRequests: z.number().optional().default(0),
   totalAttributedTokens: z.number().optional().default(0),
+  totalPrimaryCredits: z.number().optional().default(0),
 });
 
 const UsageModelEntrySchema = z.object({
@@ -307,6 +308,13 @@ const UsageSeriesBucketSchema = z.object({
   values: z.record(z.string(), z.number()),
 });
 
+const UsageWindowSeriesBucketSchema = z.object({
+  bucket: z.string(),
+  label: z.string(),
+  primaryCredits: z.number(),
+  secondaryCredits: z.number(),
+});
+
 export const UsageStatsResponseSchema = z.object({
   range: UsageStatsRangeSchema,
   bucket: z.enum(["hour", "day"]),
@@ -316,10 +324,12 @@ export const UsageStatsResponseSchema = z.object({
   summary: UsageStatsSummarySchema,
   byModel: z.array(UsageModelEntrySchema),
   series: z.array(UsageSeriesBucketSchema),
+  windowSeries: z.array(UsageWindowSeriesBucketSchema).optional().default([]),
   metric: UsageStatsMetricSchema.optional().default("tokens"),
 });
 
 export type UsageStatsSummary = z.infer<typeof UsageStatsSummarySchema>;
 export type UsageModelEntry = z.infer<typeof UsageModelEntrySchema>;
 export type UsageSeriesBucket = z.infer<typeof UsageSeriesBucketSchema>;
+export type UsageWindowSeriesBucket = z.infer<typeof UsageWindowSeriesBucketSchema>;
 export type UsageStatsResponse = z.infer<typeof UsageStatsResponseSchema>;

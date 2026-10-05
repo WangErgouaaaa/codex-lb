@@ -30,6 +30,7 @@ export const CartesianGrid = lazyRechartsComponent("CartesianGrid");
 export const Cell = lazyRechartsComponent("Cell");
 export const Legend = lazyRechartsComponent("Legend");
 export const Line = lazyRechartsComponent("Line");
+export const LineChart = lazyRechartsComponent("LineChart");
 export const Pie = lazyRechartsComponent("Pie");
 export const PieChart = lazyRechartsComponent("PieChart");
 export const ResponsiveContainer = lazyRechartsComponent("ResponsiveContainer");

@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.utils.time import to_utc_naive, utcnow
+from app.core import usage as usage_core
 from app.modules.reports.repository import (
     MAX_DAILY_REPORT_DAYS,
     UNKNOWN_MODEL_BUCKET,
@@ -29,6 +30,8 @@ from app.modules.reports.schemas import (
     UserAgentCostEntry,
 )
 from app.modules.usage.credit_aggregation import CreditAttributionRepository
+from app.modules.usage.mappers import usage_history_to_window_row
+from app.modules.usage.repository import UsageRepository
 
 
 class InvalidReportDateRangeError(ValueError):
@@ -45,10 +48,14 @@ WINDOW_CREDITS_SERIES_WINDOWS = ("primary", "secondary")
 
 class ReportsService:
     def __init__(
-        self, repository: ReportsRepository, credit_repository: CreditAttributionRepository | None = None
+        self,
+        repository: ReportsRepository,
+        credit_repository: CreditAttributionRepository | None = None,
+        usage_repository: UsageRepository | None = None,
     ) -> None:
         self._repository = repository
         self._credit_repository = credit_repository
+        self._usage_repository = usage_repository
 
     async def get_reports(
         self,
@@ -230,6 +237,8 @@ class ReportsService:
         credit_bucket_rows = []
         window_series: list[UsageWindowSeriesBucket] = []
         total_primary_credits = 0.0
+        pool_primary_capacity = 0.0
+        pool_secondary_capacity = 0.0
         if self._credit_repository is not None:
             credit_rows = await self._credit_repository.aggregate_credits_by_model(start_at, end_at, CREDITS_WINDOW)
             credits_by_model = {row.model: row.credits_sum for row in credit_rows}
@@ -239,6 +248,7 @@ class ReportsService:
             attributed_requests_by_model = {row.model: row.request_count for row in credit_rows}
             if metric == "window_credits":
                 window_series, total_primary_credits = await self._build_window_series(bucket_ranges)
+                pool_primary_capacity, pool_secondary_capacity = await self._pool_window_capacities()
             else:
                 credit_bucket_rows = await self._credit_repository.aggregate_credits_by_model_bucket(
                     bucket_ranges, CREDITS_WINDOW
@@ -336,6 +346,8 @@ class ReportsService:
                 total_cost_usd=round(total_cost_usd, 4),
                 total_credits=round(total_credits, 2),
                 total_primary_credits=round(total_primary_credits, 2),
+                primary_capacity_credits=round(pool_primary_capacity, 2),
+                secondary_capacity_credits=round(pool_secondary_capacity, 2),
                 attributed_requests=attributed_requests,
                 total_attributed_tokens=sum(attributed_tokens_by_model.values()),
             ),
@@ -368,6 +380,35 @@ class ReportsService:
         ]
         total_primary = sum(bucket.primary_credits for bucket in series)
         return series, total_primary
+
+    async def _pool_window_capacities(self) -> tuple[float, float]:
+        """Pool quota capacities, mirroring the dashboard overview cards.
+
+        Latest usage rows per account get the weekly-only remap and the
+        nominal plan-capacity conversion the dashboard window summaries use,
+        so the chart's capacity denominator matches the cards operators
+        compare against.
+        """
+        if self._usage_repository is None:
+            return 0.0, 0.0
+        accounts = await self._repository.list_accounts()
+        account_map = {account.id: account for account in accounts}
+        primary_rows = [
+            usage_history_to_window_row(entry)
+            for entry in (await self._usage_repository.latest_by_account("primary")).values()
+        ]
+        secondary_rows = [
+            usage_history_to_window_row(entry)
+            for entry in (await self._usage_repository.latest_by_account("secondary")).values()
+        ]
+        primary_rows, secondary_rows = usage_core.normalize_weekly_only_rows(primary_rows, secondary_rows)
+        primary_summary = usage_core.normalize_usage_window(
+            usage_core.summarize_usage_window(primary_rows, account_map, "primary")
+        )
+        secondary_summary = usage_core.normalize_usage_window(
+            usage_core.summarize_usage_window(secondary_rows, account_map, "secondary")
+        )
+        return primary_summary.capacity_credits, secondary_summary.capacity_credits
 
 
 def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:

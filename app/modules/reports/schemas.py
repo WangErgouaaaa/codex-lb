@@ -88,6 +88,8 @@ class UsageStatsSummary(DashboardModel):
     attributed_requests: int = 0
     total_attributed_tokens: int = 0
     total_primary_credits: float = 0.0
+    primary_capacity_credits: float = 0.0
+    secondary_capacity_credits: float = 0.0
 
 
 class UsageModelEntry(DashboardModel):

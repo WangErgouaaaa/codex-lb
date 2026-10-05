@@ -85,6 +85,8 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
       attributedRequests: 55,
       totalAttributedTokens: 1_150_000,
       totalPrimaryCredits: 0,
+      primaryCapacityCredits: 0,
+      secondaryCapacityCredits: 0,
     },
     byModel: [
       {
@@ -268,6 +270,8 @@ describe("UsageStatsPanel", () => {
           attributedRequests: 0,
           totalAttributedTokens: 0,
           totalPrimaryCredits: 0,
+          primaryCapacityCredits: 0,
+          secondaryCapacityCredits: 0,
         },
         byModel: [],
         series: [{ bucket: "2026-10-01T00", label: "00:00", values: {} }],
@@ -375,7 +379,13 @@ describe("UsageStatsPanel", () => {
           { bucket: "2026-10-01T09", label: "09:00", primaryCredits: 30, secondaryCredits: 60 },
           { bucket: "2026-10-01T10", label: "10:00", primaryCredits: 10, secondaryCredits: 20 },
         ],
-        summary: { ...makeResponse().summary, totalPrimaryCredits: 40, totalCredits: 80 },
+        summary: {
+          ...makeResponse().summary,
+          totalPrimaryCredits: 40,
+          totalCredits: 80,
+          primaryCapacityCredits: 40,
+          secondaryCapacityCredits: 80,
+        },
       }),
     );
     const user = userEvent.setup();
@@ -390,7 +400,7 @@ describe("UsageStatsPanel", () => {
     expect(await screen.findByTestId("usage-stats-window-chart")).toBeInTheDocument();
     expect(screen.queryByTestId("usage-bar-chart")).not.toBeInTheDocument();
 
-    // Each line is a share of its own window's range total: 30/40 = 75%,
+    // Each line is a share of the pool's window capacity: 30/40 = 75%,
     // 60/80 = 75% in the first bucket and 25% in the second.
     expect(capturedWindowProps?.data).toEqual([
       { label: "09:00", primaryPercent: 75, secondaryPercent: 75, primaryCredits: 30, secondaryCredits: 60 },
@@ -398,12 +408,14 @@ describe("UsageStatsPanel", () => {
     ]);
     expect(capturedLines.map((line) => line.dataKey)).toEqual(["primaryPercent", "secondaryPercent"]);
 
-    // Cards expose both window totals and the per-model table stays visible.
+    // Cards expose both window totals with their pool capacity denominators.
     expect(screen.getByText("5-Hour Credits")).toBeInTheDocument();
     expect(screen.getByText("Weekly Credits")).toBeInTheDocument();
+    expect(screen.getByText("Pool capacity: 40")).toBeInTheDocument();
+    expect(screen.getByText("Pool capacity: 80")).toBeInTheDocument();
     expect(screen.getByTestId("usage-stats-row-gpt-astra")).toBeInTheDocument();
     expect(
-      screen.getByText("Quota window consumption share (5-Hour vs Weekly, % of range total)"),
+      screen.getByText("Quota window consumption (5-Hour vs Weekly, % of pool capacity)"),
     ).toBeInTheDocument();
   });
 });

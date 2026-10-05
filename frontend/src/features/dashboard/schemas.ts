@@ -286,6 +286,8 @@ const UsageStatsSummarySchema = z.object({
   attributedRequests: z.number().optional().default(0),
   totalAttributedTokens: z.number().optional().default(0),
   totalPrimaryCredits: z.number().optional().default(0),
+  primaryCapacityCredits: z.number().optional().default(0),
+  secondaryCapacityCredits: z.number().optional().default(0),
 });
 
 const UsageModelEntrySchema = z.object({

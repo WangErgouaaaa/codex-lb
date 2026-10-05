@@ -146,22 +146,27 @@ export function UsageStatsPanel() {
   }, [data, seriesNames]);
 
   // Window view rows: each bucket's 5h/weekly attributed credits as a share
-  // of that window's range total, so both lines normalize to 100%.
+  // of the pool's window capacity (the dashboard card denominator), so the
+  // lines read directly against the remaining quota budget.
   const windowChartData = useMemo(() => {
     const buckets = data?.windowSeries ?? [];
+    const primaryCapacity = data?.summary.primaryCapacityCredits ?? 0;
+    const secondaryCapacity = data?.summary.secondaryCapacityCredits ?? 0;
     const primaryTotal = buckets.reduce((sum, bucket) => sum + bucket.primaryCredits, 0);
     const secondaryTotal = buckets.reduce((sum, bucket) => sum + bucket.secondaryCredits, 0);
-    const toPercent = (value: number, total: number) => (total > 0 ? (value / total) * 100 : 0);
+    const toPercent = (value: number, capacity: number) => (capacity > 0 ? (value / capacity) * 100 : 0);
     return {
       rows: buckets.map((bucket) => ({
         label: bucket.label,
-        primaryPercent: toPercent(bucket.primaryCredits, primaryTotal),
-        secondaryPercent: toPercent(bucket.secondaryCredits, secondaryTotal),
+        primaryPercent: toPercent(bucket.primaryCredits, primaryCapacity),
+        secondaryPercent: toPercent(bucket.secondaryCredits, secondaryCapacity),
         primaryCredits: bucket.primaryCredits,
         secondaryCredits: bucket.secondaryCredits,
       })),
       primaryTotal,
       secondaryTotal,
+      primaryCapacity,
+      secondaryCapacity,
     };
   }, [data]);
 
@@ -379,12 +384,16 @@ export function UsageStatsPanel() {
                 <StatCard
                   label={t("dashboard.usage.fiveHourCredits")}
                   value={formatCompactNumber(windowChartData.primaryTotal)}
-                  sub={t("dashboard.usageStats.stat.creditsNote")}
+                  sub={t("dashboard.usageStats.stat.poolCapacity", {
+                    capacity: formatCompactNumber(windowChartData.primaryCapacity),
+                  })}
                 />
                 <StatCard
                   label={t("dashboard.usage.weeklyCredits")}
                   value={formatCompactNumber(windowChartData.secondaryTotal)}
-                  sub={t("dashboard.usageStats.stat.creditsNote")}
+                  sub={t("dashboard.usageStats.stat.poolCapacity", {
+                    capacity: formatCompactNumber(windowChartData.secondaryCapacity),
+                  })}
                 />
                 <StatCard
                   label={t("dashboard.usageStats.stat.attributedRequests")}

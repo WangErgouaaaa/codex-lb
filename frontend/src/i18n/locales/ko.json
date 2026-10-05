@@ -756,6 +756,7 @@
   "dashboard.usageStats.stat.creditsPerRequestNote": "호출당 평균 실제 소비",
   "dashboard.usageStats.stat.failedRequests": "{{count}}건 실패",
   "dashboard.usageStats.stat.models": "모델 수",
+  "dashboard.usageStats.stat.poolCapacity": "풀 용량 {{capacity}}",
   "dashboard.usageStats.stat.requests": "요청 수",
   "dashboard.usageStats.stat.shareOfRequests": "요청의 {{percent}}%",
   "dashboard.usageStats.stat.shareOfTotal": "전체의 {{percent}}%",

@@ -332,7 +332,11 @@ def get_reports_context(
     session: AsyncSession = Depends(get_session),
 ) -> ReportsContext:
     repository = ReportsRepository(session)
-    service = ReportsService(repository, CreditAttributionRepository(session))
+    service = ReportsService(
+        repository,
+        CreditAttributionRepository(session),
+        UsageRepository(session),
+    )
     return ReportsContext(session=session, repository=repository, service=service)
 
 

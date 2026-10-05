@@ -381,13 +381,36 @@ async def test_usage_stats_api_cost_and_credits_metrics(async_client, db_setup, 
     )
     assert response.status_code == 422
 async def test_usage_stats_window_credits_metric_builds_both_window_series(async_client, db_setup, monkeypatch):
-    from app.db.models import RequestCreditAttribution
+    from app.db.models import RequestCreditAttribution, UsageHistory
 
     fixed_now = datetime(2026, 6, 12, 15, 30, 0, tzinfo=timezone.utc)
     monkeypatch.setattr("app.modules.reports.service.utcnow", lambda: fixed_now)
     captured_at = _naive_utc(datetime(2026, 6, 12, 10, 30, 0, tzinfo=timezone.utc))
     async with SessionLocal() as session:
         session.add(_make_account("acc_window_credits", "window-credits@example.com"))
+        now_ts = int(datetime(2026, 6, 12, 15, 0, 0, tzinfo=timezone.utc).timestamp())
+        session.add_all(
+            [
+                # Latest usage rows give the pool capacity denominators
+                # (plus plan: 225 primary / 7560 secondary nominal credits).
+                UsageHistory(
+                    account_id="acc_window_credits",
+                    recorded_at=captured_at,
+                    window="primary",
+                    used_percent=50.0,
+                    reset_at=now_ts + 4 * 3600,
+                    window_minutes=300,
+                ),
+                UsageHistory(
+                    account_id="acc_window_credits",
+                    recorded_at=captured_at,
+                    window="secondary",
+                    used_percent=20.0,
+                    reset_at=now_ts + 6 * 24 * 3600,
+                    window_minutes=10080,
+                ),
+            ]
+        )
         astra_log = RequestLog(
             account_id="acc_window_credits",
             request_id="window-credits-astra",
@@ -470,6 +493,10 @@ async def test_usage_stats_window_credits_metric_builds_both_window_series(async
     assert payload["windowSeries"][0]["primaryCredits"] == 0.0
     assert payload["summary"]["totalPrimaryCredits"] == 30.0
     assert payload["summary"]["totalCredits"] == 72.0
+    # Pool capacity denominators mirror the dashboard overview cards: the
+    # plus plan's nominal window capacities over accounts with usage rows.
+    assert payload["summary"]["primaryCapacityCredits"] == 225.0
+    assert payload["summary"]["secondaryCapacityCredits"] == 7560.0
     # The model series stays empty; the window chart reads windowSeries instead.
     assert all(bucket["values"] == {} for bucket in payload["series"])
     # Table semantics follow the credits metric: secondary-window ordering.

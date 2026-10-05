@@ -387,6 +387,10 @@ class ReportsRepository:
         )
         return int(result.scalar_one() or 0)
 
+    async def list_accounts(self) -> list[Account]:
+        result = await self._session.execute(select(Account))
+        return list(result.scalars().all())
+
     async def earliest_report_activity_at(
         self,
         account_ids: list[str] | None = None,

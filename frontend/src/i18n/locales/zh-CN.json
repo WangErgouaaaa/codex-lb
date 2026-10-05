@@ -756,7 +756,7 @@
   "dashboard.usageStats.stat.creditsPerRequestNote": "平均每轮真实消耗",
   "dashboard.usageStats.stat.failedRequests": "{{count}} 次失败",
   "dashboard.usageStats.stat.models": "模型数",
-  "dashboard.usageStats.stat.poolCapacity": "池容量 {{capacity}}",
+  "dashboard.usageStats.stat.poolCapacity": "池容量：{{capacity}}",
   "dashboard.usageStats.stat.requests": "请求数",
   "dashboard.usageStats.stat.shareOfRequests": "占请求 {{percent}}%",
   "dashboard.usageStats.stat.shareOfTotal": "占总消耗 {{percent}}%",

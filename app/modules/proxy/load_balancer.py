@@ -23,6 +23,7 @@ from app.core.balancer import (
     TRAFFIC_CLASS_FOREGROUND,
     TRAFFIC_CLASS_OPPORTUNISTIC,
     AccountState,
+    HardAffinityOwnerQuota,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
     RoutingStrategy,
@@ -191,6 +192,7 @@ class AccountSelection:
     error_code: str | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
+    hard_owner_quota: HardAffinityOwnerQuota | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,6 +581,7 @@ class LoadBalancer:
         error_message: str | None = None
         selected_lease: AccountLease | None = None
         selection_error_code: str | None = None
+        hard_owner_quota: HardAffinityOwnerQuota | None = None
         legacy_existing_account_id: str | None = None
         if sticky_source == "session_header" and legacy_sticky_key is not None:
             async with self._repo_factory() as repos:
@@ -692,6 +695,7 @@ class LoadBalancer:
             selected_lease = sticky_outcome.selected_lease
             error_message = sticky_outcome.error_message
             selection_error_code = sticky_outcome.error_code
+            hard_owner_quota = sticky_outcome.hard_owner_quota
             if sticky_outcome.disposition == "direct_error":
                 return AccountSelection(
                     account=None,
@@ -738,7 +742,12 @@ class LoadBalancer:
                 and (selection_inputs.accounts or selection_inputs.error_code is not None)
             ):
                 set_normal()
-            return AccountSelection(account=None, error_message=error_message, error_code=selection_error_code)
+            return AccountSelection(
+                account=None,
+                error_message=error_message,
+                error_code=selection_error_code,
+                hard_owner_quota=hard_owner_quota,
+            )
         if not circuit_breaker_open:
             set_normal()
         logger.info(

@@ -3,11 +3,17 @@ from __future__ import annotations
 import inspect
 import json
 import sys
+import time
 from collections.abc import Callable
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Literal, Mapping, cast
 
-from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.balancer import (
+    PERMANENT_FAILURE_CODES,
+    HardAffinityOwnerQuota,
+    plausible_rate_limit_reset_at,
+)
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -43,6 +49,7 @@ from app.core.errors import (
 )
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+    ResponseFailedEvent,
     response_failed_event,
 )
 from app.core.openai.models import OpenAIEvent
@@ -889,3 +896,46 @@ def _upstream_turn_state_from_socket(upstream: UpstreamResponsesWebSocket | None
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def hard_affinity_usage_limit_failed_event(
+    *,
+    error_code: str | None,
+    hard_owner_quota: HardAffinityOwnerQuota | None,
+    request_id: str,
+    now: float | None = None,
+) -> ResponseFailedEvent | None:
+    """Translate a quota-exhausted hard-affinity owner into the upstream
+    usage-limit error shape.
+
+    A pinned conversation cannot move accounts, so when its owner is merely
+    rate-limited the client must see the real reset deadline instead of a
+    generic "No available accounts" 502 it will blindly retry. Returns
+    ``None`` when the saturation is not a quota window, leaving the existing
+    generic selection error in place.
+    """
+    if error_code != "hard_affinity_saturated" or hard_owner_quota is None:
+        return None
+    if hard_owner_quota.status != AccountStatus.RATE_LIMITED:
+        return None
+    current = time.time() if now is None else now
+    reset_at = plausible_rate_limit_reset_at(hard_owner_quota.reset_at, now=current)
+    if reset_at is None:
+        return None
+    resets_in_seconds = max(0, int(reset_at - current))
+    reset_iso = datetime.fromtimestamp(reset_at, tz=timezone.utc).isoformat(timespec="seconds")
+    message = (
+        "Usage limit reached for the account this conversation is pinned to; "
+        f"the window resets at {reset_iso}. "
+        "Start a new conversation to route to a different account."
+    )
+    return response_failed_event(
+        "usage_limit_reached",
+        message,
+        error_type="usage_limit_reached",
+        response_id=request_id,
+        created_at=int(current),
+        plan_type=hard_owner_quota.plan_type,
+        resets_at=int(reset_at),
+        resets_in_seconds=resets_in_seconds,
+    )

@@ -34,6 +34,7 @@ from app.modules.proxy._service.observability import (
     _record_upstream_transport_decision,
 )
 from app.modules.proxy._service.streaming.continuity import _retained_http_stream_fresh_replay
+from app.modules.proxy._service.streaming.helpers import hard_affinity_usage_limit_failed_event
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
@@ -1342,6 +1343,38 @@ class _StreamingRetryMixin:
                             status="error",
                             error_code=last_security_work_retry_error.code,
                             error_message=message,
+                            reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
+                            transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
+                            service_tier=payload.service_tier,
+                            requested_service_tier=payload.service_tier,
+                            useragent=useragent,
+                            useragent_group=useragent_group,
+                            conversation_id=conversation_id,
+                            client_ip=client_ip,
+                        )
+                        return
+                    usage_limit_event = hard_affinity_usage_limit_failed_event(
+                        error_code=selection.error_code,
+                        hard_owner_quota=selection.hard_owner_quota,
+                        request_id=request_id,
+                    )
+                    if usage_limit_event is not None:
+                        # The conversation is pinned to a quota-exhausted
+                        # owner: surface the real reset deadline in the
+                        # upstream usage-limit shape so clients stop blind
+                        # 502 retries. Keep the routing-truth error code in
+                        # the request log for analytics.
+                        yield format_sse_event(usage_limit_event)
+                        await proxy._write_request_log(
+                            account_id=None,
+                            api_key=api_key,
+                            request_id=request_id,
+                            model=payload.model,
+                            latency_ms=int((time.monotonic() - start) * 1000),
+                            status="error",
+                            error_code="hard_affinity_saturated",
+                            error_message=usage_limit_event["response"]["error"]["message"],
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
                             upstream_transport=upstream_stream_transport,

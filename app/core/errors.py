@@ -106,10 +106,19 @@ def response_failed_event(
     created_at: int | None = None,
     error_param: str | None = None,
     incomplete_details: dict[str, str] | None = None,
+    plan_type: str | None = None,
+    resets_at: int | float | None = None,
+    resets_in_seconds: int | float | None = None,
 ) -> ResponseFailedEvent:
     error = openai_error(code, message, error_type)["error"]
     if error_param:
         error["param"] = error_param
+    if plan_type:
+        error["plan_type"] = plan_type
+    if resets_at is not None:
+        error["resets_at"] = resets_at
+    if resets_in_seconds is not None:
+        error["resets_in_seconds"] = resets_in_seconds
     if created_at is None:
         created_at = int(time.time())
     response: ResponseFailedResponse = {

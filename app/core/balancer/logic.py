@@ -141,6 +141,21 @@ class AccountState:
     ignore_standard_quota: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class HardAffinityOwnerQuota:
+    """Why a hard-affinity owner could not serve its pinned conversation.
+
+    Carried on failed selections only, so the streaming retry path can
+    translate a quota-exhausted owner into the client-facing usage-limit
+    error shape instead of a generic "No available accounts" 502.
+    """
+
+    account_id: str
+    status: AccountStatus
+    reset_at: float | None = None
+    plan_type: str | None = None
+
+
 @dataclass
 class SelectionResult:
     account: AccountState | None

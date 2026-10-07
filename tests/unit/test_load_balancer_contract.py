@@ -631,6 +631,36 @@ async def test_hard_sticky_owner_miss_does_not_mark_healthy_pool_degraded(
 
 
 @pytest.mark.asyncio
+async def test_hard_sticky_owner_rate_limit_reports_owner_quota(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    reset_at = int(datetime.now(UTC).timestamp()) + 3_600
+    rate_limited_owner = _account("contract-sticky-quota-owner")
+    rate_limited_owner.status = AccountStatus.RATE_LIMITED
+    rate_limited_owner.reset_at = reset_at
+    available_alternate = _account("contract-sticky-quota-alternate")
+    balancer, _, _, sticky_repo = _balancer(
+        [rate_limited_owner, available_alternate],
+        selection_cache,
+    )
+    sticky_repo.account_id = rate_limited_owner.id
+
+    selection = await balancer.select_account(
+        sticky_key="hard-owned-quota-turn-state",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        lease_kind="stream",
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "hard_affinity_saturated"
+    assert selection.hard_owner_quota is not None
+    assert selection.hard_owner_quota.account_id == rate_limited_owner.id
+    assert selection.hard_owner_quota.status == AccountStatus.RATE_LIMITED
+    assert selection.hard_owner_quota.reset_at == float(reset_at)
+    assert selection.hard_owner_quota.plan_type == "plus"
+
+
+@pytest.mark.asyncio
 async def test_hard_sticky_owner_miss_with_optional_preferred_owner_preserves_global_health(
     selection_cache: AccountSelectionCache,
     monkeypatch: pytest.MonkeyPatch,

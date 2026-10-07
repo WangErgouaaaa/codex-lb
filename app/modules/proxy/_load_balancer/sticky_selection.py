@@ -16,6 +16,7 @@ from app.core.balancer import (
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
     AccountState,
+    HardAffinityOwnerQuota,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
     RoutingStrategy,
@@ -226,6 +227,7 @@ class StickySelectionOutcome(Generic[SelectionInputsT]):
     error_message: str | None
     error_code: str | None
     disposition: StickySelectionDisposition = "shared_result"
+    hard_owner_quota: HardAffinityOwnerQuota | None = None
 
 
 async def run_sticky_selection_path(
@@ -263,6 +265,7 @@ async def run_sticky_selection_path(
     selected_lease: AccountLease | None = None
     error_message: str | None = None
     selection_error_code: str | None = None
+    hard_owner_quota: HardAffinityOwnerQuota | None = None
 
     def _direct_error(
         *,
@@ -401,6 +404,22 @@ async def run_sticky_selection_path(
         if hard_sticky and not selection_states:
             selection_error_code = "hard_affinity_saturated"
             result = SelectionResult(None, "Hard affinity owner account is unavailable")
+            # The owner never entered the prepared states (scope exclusion or
+            # request-level exclusion). The raw account row still tells the
+            # retry path whether this saturation is a quota window it can
+            # describe to the client with a reset deadline.
+            owner_account = (
+                account_map.get(sticky_existing_account_id)
+                if isinstance(sticky_existing_account_id, str)
+                else None
+            )
+            if owner_account is not None:
+                hard_owner_quota = HardAffinityOwnerQuota(
+                    account_id=owner_account.id,
+                    status=owner_account.status,
+                    reset_at=float(owner_account.reset_at) if owner_account.reset_at else None,
+                    plan_type=owner_account.plan_type,
+                )
         elif not selection_states and states:
             selection_error_code = _account_cap_error_code(lease_kind)
             result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
@@ -430,6 +449,16 @@ async def run_sticky_selection_path(
             )
             if result.account is None:
                 selection_error_code = "hard_affinity_saturated"
+                # selection_states for hard rows is exactly the owner state;
+                # its runtime status/reset explains why budget-safe selection
+                # refused it (usually a saturated quota window).
+                owner_state = selection_states[0]
+                hard_owner_quota = HardAffinityOwnerQuota(
+                    account_id=owner_state.account_id,
+                    status=owner_state.status,
+                    reset_at=owner_state.reset_at,
+                    plan_type=owner_state.plan_type,
+                )
                 result = SelectionResult(
                     None,
                     result.error_message or "Hard affinity owner account is unavailable",
@@ -852,6 +881,7 @@ async def run_sticky_selection_path(
         selected_lease=selected_lease,
         error_message=error_message,
         error_code=selection_error_code,
+        hard_owner_quota=hard_owner_quota,
     )
 
 

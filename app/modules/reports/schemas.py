@@ -90,6 +90,7 @@ class UsageStatsSummary(DashboardModel):
     total_primary_credits: float = 0.0
     primary_capacity_credits: float = 0.0
     secondary_capacity_credits: float = 0.0
+    account_count: int = 0
 
 
 class UsageModelEntry(DashboardModel):
@@ -105,6 +106,20 @@ class UsageModelEntry(DashboardModel):
     attributed_tokens: int = 0
     attributed_requests: int = 0
 
+
+class UsageAccountEntry(DashboardModel):
+    account_id: str
+    name: str
+    plan_type: str | None = None
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_input_tokens: int = 0
+    total_tokens: int = 0
+    cost_usd: float = 0.0
+    credits: float = 0.0
+    capacity_credits: float = 0.0
+    quota_percent: float = 0.0
 
 class UsageSeriesBucket(DashboardModel):
     bucket: str
@@ -135,4 +150,5 @@ class UsageStatsResponse(DashboardModel):
     by_model: list[UsageModelEntry] = Field(default_factory=list)
     series: list[UsageSeriesBucket] = Field(default_factory=list)
     window_series: list[UsageWindowSeriesBucket] = Field(default_factory=list)
+    accounts: list[UsageAccountEntry] = Field(default_factory=list)
     metric: str = "tokens"

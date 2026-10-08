@@ -11,12 +11,18 @@ from app.db.session import SessionLocal
 pytestmark = pytest.mark.integration
 
 
-def _make_account(account_id: str, email: str) -> Account:
+def _make_account(
+    account_id: str,
+    email: str,
+    plan_type: str = "plus",
+    alias: str | None = None,
+) -> Account:
     encryptor = TokenEncryptor()
     return Account(
         id=account_id,
         email=email,
-        plan_type="plus",
+        alias=alias,
+        plan_type=plan_type,
         access_token_encrypted=encryptor.encrypt("access"),
         refresh_token_encrypted=encryptor.encrypt("refresh"),
         id_token_encrypted=encryptor.encrypt("id"),
@@ -510,3 +516,207 @@ async def test_usage_stats_window_credits_metric_builds_both_window_series(async
     )
     assert response.status_code == 200
     assert response.json()["windowSeries"] == []
+
+
+async def test_usage_stats_accounts_metric_aggregates_tokens_and_credits(async_client, db_setup, monkeypatch):
+    from app.db.models import RequestCreditAttribution
+
+    fixed_now = datetime(2026, 6, 12, 15, 30, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.modules.reports.service.utcnow", lambda: fixed_now)
+    captured_at = _naive_utc(datetime(2026, 6, 12, 10, 30, 0, tzinfo=timezone.utc))
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                _make_account("acc_accounts_pro", "accounts-pro@example.com", plan_type="pro", alias="Pro Alias"),
+                _make_account("acc_accounts_plus", "accounts-plus@example.com"),
+            ]
+        )
+        pro_a = RequestLog(
+            account_id="acc_accounts_pro",
+            request_id="accounts-pro-a",
+            requested_at=_naive_utc(datetime(2026, 6, 12, 10, 5, 0, tzinfo=timezone.utc)),
+            model="gpt-astra",
+            status="success",
+            input_tokens=1000,
+            output_tokens=200,
+            cached_input_tokens=300,
+            cost_usd=0.5,
+        )
+        pro_b = RequestLog(
+            account_id="acc_accounts_pro",
+            request_id="accounts-pro-b",
+            requested_at=_naive_utc(datetime(2026, 6, 12, 11, 20, 0, tzinfo=timezone.utc)),
+            model="gpt-sol",
+            status="success",
+            input_tokens=500,
+            output_tokens=100,
+            cached_input_tokens=0,
+            cost_usd=0.1,
+        )
+        plus_a = RequestLog(
+            account_id="acc_accounts_plus",
+            request_id="accounts-plus-a",
+            requested_at=_naive_utc(datetime(2026, 6, 12, 10, 45, 0, tzinfo=timezone.utc)),
+            model="gpt-astra",
+            status="success",
+            input_tokens=2000,
+            output_tokens=400,
+            cached_input_tokens=500,
+            cost_usd=1.0,
+        )
+        plus_b = RequestLog(
+            account_id="acc_accounts_plus",
+            request_id="accounts-plus-b",
+            requested_at=_naive_utc(datetime(2026, 6, 12, 12, 10, 0, tzinfo=timezone.utc)),
+            model="gpt-astra",
+            status="success",
+            input_tokens=700,
+            output_tokens=100,
+            cached_input_tokens=0,
+            cost_usd=0.2,
+        )
+        session.add_all([pro_a, pro_b, plus_a, plus_b])
+        await session.flush()
+        session.add_all(
+            [
+                RequestCreditAttribution(
+                    request_log_id=pro_a.id,
+                    account_id="acc_accounts_pro",
+                    window="secondary",
+                    credits=100.0,
+                    snapshot_id=1,
+                    attributed_at=captured_at,
+                ),
+                RequestCreditAttribution(
+                    request_log_id=pro_b.id,
+                    account_id="acc_accounts_pro",
+                    window="secondary",
+                    credits=152.0,
+                    snapshot_id=3,
+                    attributed_at=captured_at,
+                ),
+                RequestCreditAttribution(
+                    request_log_id=plus_a.id,
+                    account_id="acc_accounts_plus",
+                    window="secondary",
+                    credits=700.0,
+                    snapshot_id=1,
+                    attributed_at=captured_at,
+                ),
+                RequestCreditAttribution(
+                    request_log_id=plus_b.id,
+                    account_id="acc_accounts_plus",
+                    window="secondary",
+                    credits=56.0,
+                    snapshot_id=4,
+                    attributed_at=captured_at,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports/usage-stats",
+        params={"range": "today", "timezone": "UTC", "metric": "accounts"},
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["metric"] == "accounts"
+    # Accounts sort by total tokens desc: plus (3200) before pro (1800).
+    assert [entry["accountId"] for entry in payload["accounts"]] == [
+        "acc_accounts_plus",
+        "acc_accounts_pro",
+    ]
+    plus_entry, pro_entry = payload["accounts"]
+    # Name falls back to email when the account has no alias.
+    assert plus_entry["name"] == "accounts-plus@example.com"
+    assert plus_entry["planType"] == "plus"
+    assert plus_entry["requests"] == 2
+    assert plus_entry["inputTokens"] == 2700
+    assert plus_entry["outputTokens"] == 500
+    assert plus_entry["cachedInputTokens"] == 500
+    # Token totals count input + output only (cached is an input subset).
+    assert plus_entry["totalTokens"] == 3200
+    assert plus_entry["costUsd"] == 1.2
+    assert plus_entry["credits"] == 756.0
+    # Nominal weekly capacities: plus=7560, pro=50400 credits.
+    assert plus_entry["capacityCredits"] == 7560.0
+    assert plus_entry["quotaPercent"] == 10.0
+    assert pro_entry["name"] == "Pro Alias"
+    assert pro_entry["planType"] == "pro"
+    assert pro_entry["requests"] == 2
+    assert pro_entry["totalTokens"] == 1800
+    assert pro_entry["costUsd"] == 0.6
+    assert pro_entry["credits"] == 252.0
+    assert pro_entry["capacityCredits"] == 50400.0
+    assert pro_entry["quotaPercent"] == 0.5
+    # The accounts view charts per-account bars; the model series stays empty.
+    assert all(bucket["values"] == {} for bucket in payload["series"])
+    assert payload["summary"]["accountCount"] == 2
+    assert payload["summary"]["secondaryCapacityCredits"] == 57960.0
+
+
+async def test_usage_stats_accounts_metric_unknown_plan_gets_zero_capacity(async_client, db_setup, monkeypatch):
+    from app.db.models import RequestCreditAttribution
+
+    fixed_now = datetime(2026, 6, 12, 15, 30, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.modules.reports.service.utcnow", lambda: fixed_now)
+    captured_at = _naive_utc(datetime(2026, 6, 12, 10, 30, 0, tzinfo=timezone.utc))
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_accounts_mystery", "accounts-mystery@example.com", plan_type="mystery"))
+        log = RequestLog(
+            account_id="acc_accounts_mystery",
+            request_id="accounts-mystery",
+            requested_at=_naive_utc(datetime(2026, 6, 12, 10, 5, 0, tzinfo=timezone.utc)),
+            model="gpt-astra",
+            status="success",
+            input_tokens=100,
+            output_tokens=40,
+            cached_input_tokens=0,
+            cost_usd=0.0,
+        )
+        session.add(log)
+        await session.flush()
+        session.add(
+            RequestCreditAttribution(
+                request_log_id=log.id,
+                account_id="acc_accounts_mystery",
+                window="secondary",
+                credits=12.0,
+                snapshot_id=1,
+                attributed_at=captured_at,
+            )
+        )
+        await session.commit()
+
+    response = await async_client.get(
+        "/api/reports/usage-stats",
+        params={"range": "today", "timezone": "UTC", "metric": "accounts"},
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    accounts = payload["accounts"]
+    assert len(accounts) == 1
+    # An unrecognized plan has no nominal weekly capacity to divide by, but
+    # the credits themselves are still reported.
+    assert accounts[0]["capacityCredits"] == 0.0
+    assert accounts[0]["quotaPercent"] == 0.0
+    assert accounts[0]["credits"] == 12.0
+    assert payload["summary"]["secondaryCapacityCredits"] == 0.0
+
+
+async def test_usage_stats_accounts_metric_empty_range_returns_no_accounts(async_client, db_setup, monkeypatch):
+    fixed_now = datetime(2026, 6, 12, 15, 30, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.modules.reports.service.utcnow", lambda: fixed_now)
+
+    response = await async_client.get(
+        "/api/reports/usage-stats",
+        params={"range": "7d", "timezone": "UTC", "metric": "accounts"},
+    )
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["accounts"] == []
+    assert payload["summary"]["accountCount"] == 0

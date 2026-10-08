@@ -19,6 +19,7 @@ import {
   OTHER_SERIES_KEY,
   usageUnitPriceRatio,
 } from "./usage-stats-constants";
+import type { UsageAccountChartRow } from "./usage-stats-accounts-chart";
 import type { UsageUnitPriceRow } from "./usage-stats-unitprice-chart";
 
 const UsageStatsChart = lazy(() =>
@@ -52,6 +53,15 @@ type UsageStatsWindowChartProps = {
   rows: import("./usage-stats-window-chart").UsageWindowRow[];
 };
 
+const UsageStatsAccountsChart = lazy(() =>
+  import("./usage-stats-accounts-chart").then((module) => ({
+    default: (props: UsageStatsAccountsChartProps) => <module.UsageStatsAccountsChart {...props} />,
+  })),
+);
+type UsageStatsAccountsChartProps = {
+  rows: UsageAccountChartRow[];
+};
+
 /** Frontend-only view; "unitprice" is served by the credits metric. */
 type UsageStatsView = UsageStatsMetric | "unitprice";
 
@@ -71,6 +81,7 @@ const USAGE_METRIC_OPTIONS: ReadonlyArray<{ value: UsageStatsView; labelKey: str
   { value: "cost", labelKey: "dashboard.usageStats.metric.cost" },
   { value: "unitprice", labelKey: "dashboard.usageStats.metric.unitprice" },
   { value: "window_credits", labelKey: "dashboard.usageStats.metric.window_credits" },
+  { value: "accounts", labelKey: "dashboard.usageStats.metric.accounts" },
 ];
 
 export function UsageStatsPanel() {
@@ -170,6 +181,17 @@ export function UsageStatsPanel() {
     };
   }, [data]);
 
+  // Accounts view rows: one bar per account sized by total tokens, with the
+  // weekly quota share attached for the tooltip.
+  const accountChartData = useMemo<Array<UsageAccountChartRow>>(() => {
+    return (data?.accounts ?? []).map((entry) => ({
+      name: entry.name,
+      tokens: entry.totalTokens,
+      quotaPercent: entry.quotaPercent,
+      capacityCredits: entry.capacityCredits,
+    }));
+  }, [data]);
+
   // The unitprice view locally re-sorts the table: guarded models ascending
   // by ratio first, unguarded models afterwards in server order.
   const tableRows = useMemo(() => {
@@ -190,7 +212,9 @@ export function UsageStatsPanel() {
     !data ||
     (view === "window_credits"
       ? windowChartData.primaryTotal <= 0 && windowChartData.secondaryTotal <= 0
-      : data.series.every((bucket) => Object.keys(bucket.values).length === 0));
+      : view === "accounts"
+        ? data.accounts.length === 0
+        : data.series.every((bucket) => Object.keys(bucket.values).length === 0));
 
   const cachedShare =
     data && data.summary.totalTokens > 0
@@ -418,6 +442,39 @@ export function UsageStatsPanel() {
                   />
                 )}
               </>
+            ) : view === "accounts" ? (
+              <>
+                <StatCard
+                  label={t("dashboard.usageStats.stat.activeAccounts")}
+                  value={formatNumber(data.summary.accountCount)}
+                />
+                <StatCard
+                  label={t("dashboard.usageStats.stat.totalTokens")}
+                  value={formatCompactNumber(data.summary.totalTokens)}
+                />
+                <StatCard
+                  label={t("dashboard.usageStats.stat.totalCredits")}
+                  value={formatCompactNumber(data.summary.totalCredits)}
+                  sub={
+                    attributedShare != null
+                      ? t("dashboard.usageStats.stat.shareOfRequests", { percent: attributedShare })
+                      : undefined
+                  }
+                />
+                <StatCard
+                  label={t("dashboard.usageStats.stat.weeklyCapacity")}
+                  value={formatCompactNumber(data.summary.secondaryCapacityCredits)}
+                  sub={
+                    data.summary.secondaryCapacityCredits > 0
+                      ? t("dashboard.usageStats.stat.shareOfWeeklyCapacity", {
+                          percent: Math.round(
+                            (data.summary.totalCredits / data.summary.secondaryCapacityCredits) * 100,
+                          ),
+                        })
+                      : undefined
+                  }
+                />
+              </>
             ) : (
               <>
                 <StatCard
@@ -495,6 +552,10 @@ export function UsageStatsPanel() {
                     <Suspense fallback={<div className="h-[260px] rounded-lg bg-muted/30" />}>
                       <UsageStatsWindowChart rows={windowChartData.rows} />
                     </Suspense>
+                  ) : view === "accounts" ? (
+                    <Suspense fallback={<div className="h-[260px] rounded-lg bg-muted/30" />}>
+                      <UsageStatsAccountsChart rows={accountChartData} />
+                    </Suspense>
                   ) : (
                     <Suspense fallback={<div className="h-[260px] rounded-lg bg-muted/30" />}>
                       <UsageStatsChart
@@ -527,7 +588,11 @@ export function UsageStatsPanel() {
                   </colgroup>
                   <thead className="sticky top-0 z-10 bg-card">
                     <tr className="border-b text-left text-muted-foreground">
-                      <th className="pb-2 pr-4 font-medium">{t("dashboard.usageStats.table.model")}</th>
+                      <th className="pb-2 pr-4 font-medium">
+                        {view === "accounts"
+                          ? t("dashboard.usageStats.table.account")
+                          : t("dashboard.usageStats.table.model")}
+                      </th>
                       <th className="pb-2 pr-4 text-right font-medium">{t("dashboard.usageStats.table.requests")}</th>
                       <th className="pb-2 pr-4 text-right font-medium">{t("dashboard.usageStats.table.input")}</th>
                       <th className="pb-2 pr-4 text-right font-medium">{t("dashboard.usageStats.table.output")}</th>
@@ -539,7 +604,48 @@ export function UsageStatsPanel() {
                     </tr>
                   </thead>
                   <tbody>
-                    {tableRows.map((entry) => (
+                    {view === "accounts"
+                      ? data.accounts.map((entry) => (
+                          <tr
+                            key={entry.accountId}
+                            data-testid={`usage-stats-row-${entry.accountId}`}
+                            className="border-b border-border/50 last:border-0"
+                          >
+                            <td className="py-2.5 pr-4 font-medium text-foreground">
+                              <span className="break-all">{entry.name}</span>
+                              <div className="text-xs text-muted-foreground">{entry.planType}</div>
+                            </td>
+                            <td className="py-2.5 pr-4 text-right text-foreground">{formatNumber(entry.requests)}</td>
+                            <td className="py-2.5 pr-4 text-right text-foreground">{formatCompactNumber(entry.inputTokens)}</td>
+                            <td className="py-2.5 pr-4 text-right text-foreground">{formatCompactNumber(entry.outputTokens)}</td>
+                            <td className="py-2.5 pr-4 text-right text-muted-foreground">
+                              <span>{formatCompactNumber(entry.cachedInputTokens)}</span>{" "}
+                              <CachedRate rate={cacheHitRate(entry.cachedInputTokens, entry.inputTokens)} />
+                            </td>
+                            <td className="py-2.5 pr-4 text-right font-medium text-foreground">{formatCompactNumber(entry.totalTokens)}</td>
+                            <td className="py-2.5 pr-4 text-right font-medium text-foreground">
+                              <span>{entry.credits > 0 ? formatCompactNumber(entry.credits) : "—"}</span>
+                              <div className="text-xs text-muted-foreground">
+                                {entry.capacityCredits > 0
+                                  ? t("dashboard.usageStats.table.weeklyQuota", {
+                                      percent: entry.quotaPercent.toFixed(1),
+                                    })
+                                  : "—"}
+                              </div>
+                            </td>
+                            <td className="py-2.5 pr-4 text-right font-medium text-foreground">
+                              {entry.costUsd > 0 ? formatCurrency(entry.costUsd) : "—"}
+                            </td>
+                            <td className="py-2.5 text-right text-muted-foreground">
+                              {(data.summary.totalTokens > 0
+                                ? (entry.totalTokens / data.summary.totalTokens) * 100
+                                : 0
+                              ).toFixed(1)}
+                              %
+                            </td>
+                          </tr>
+                        ))
+                      : tableRows.map((entry) => (
                       <tr
                         key={entry.model}
                         data-testid={`usage-stats-row-${entry.model}`}

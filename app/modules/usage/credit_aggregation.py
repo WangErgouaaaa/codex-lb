@@ -27,6 +27,12 @@ class CreditModelAggregateRow:
 
 
 @dataclass(frozen=True)
+class CreditAccountAggregateRow:
+    account_id: str
+    credits_sum: float
+    request_count: int
+
+@dataclass(frozen=True)
 class CreditModelBucketRow:
     bucket_key: str
     bucket_label: str
@@ -87,6 +93,51 @@ class CreditAttributionRepository:
                 output_tokens=int(row.output_tokens or 0),
             )
             for row in result.all()
+        ]
+
+    async def aggregate_credits_by_account(
+        self,
+        start_at: datetime,
+        end_at: datetime,
+        window: str,
+    ) -> list[CreditAccountAggregateRow]:
+        _validate_window(window)
+        # Each request can receive contributions from several intervals.
+        # Collapse them first so a request counts once per account.
+        per_request = (
+            select(
+                RequestCreditAttribution.request_log_id.label("request_log_id"),
+                func.sum(RequestCreditAttribution.credits).label("credits"),
+            )
+            .where(RequestCreditAttribution.window == window)
+            .group_by(RequestCreditAttribution.request_log_id)
+            .subquery()
+        )
+        stmt = (
+            select(
+                RequestLog.account_id.label("account_id"),
+                func.coalesce(func.sum(per_request.c.credits), 0.0).label("credits_sum"),
+                func.count().label("request_count"),
+            )
+            .select_from(per_request)
+            .join(RequestLog, per_request.c.request_log_id == RequestLog.id)
+            .where(
+                RequestLog.requested_at >= start_at,
+                RequestLog.requested_at < end_at,
+                _normal_traffic_clause(),
+                RequestLog.account_id.is_not(None),
+            )
+            .group_by(RequestLog.account_id)
+            .order_by(func.sum(per_request.c.credits).desc())
+        )
+        result = (await self._session.execute(stmt)).all()
+        return [
+            CreditAccountAggregateRow(
+                account_id=row.account_id,
+                credits_sum=float(row.credits_sum),
+                request_count=int(row.request_count),
+            )
+            for row in result
         ]
 
     async def aggregate_credits_by_model_bucket(

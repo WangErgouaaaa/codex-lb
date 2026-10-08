@@ -87,6 +87,7 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
       totalPrimaryCredits: 0,
       primaryCapacityCredits: 0,
       secondaryCapacityCredits: 0,
+      accountCount: 0,
     },
     byModel: [
       {
@@ -121,8 +122,29 @@ function makeResponse(overrides: Partial<UsageStatsResponse> = {}): UsageStatsRe
       { bucket: "2026-10-01T10", label: "10:00", values: { "gpt-astra": 600_000, "gpt-sol": 90_000 } },
     ],
     windowSeries: [],
+    accounts: [],
     ...overrides,
   } as UsageStatsResponse;
+}
+
+function makeAccountEntry(
+  overrides: Partial<UsageStatsResponse["accounts"][number]> = {},
+): UsageStatsResponse["accounts"][number] {
+  return {
+    accountId: "acct-alpha",
+    name: "alpha@example.com",
+    planType: "pro",
+    requests: 30,
+    inputTokens: 900_000,
+    outputTokens: 150_000,
+    cachedInputTokens: 30_000,
+    totalTokens: 1_050_000,
+    costUsd: 12.5,
+    credits: 30.0,
+    capacityCredits: 120,
+    quotaPercent: 25.0,
+    ...overrides,
+  };
 }
 
 function mockQueryData(data: UsageStatsResponse | undefined) {
@@ -272,6 +294,7 @@ describe("UsageStatsPanel", () => {
           totalPrimaryCredits: 0,
           primaryCapacityCredits: 0,
           secondaryCapacityCredits: 0,
+          accountCount: 0,
         },
         byModel: [],
         series: [{ bucket: "2026-10-01T00", label: "00:00", values: {} }],
@@ -417,5 +440,129 @@ describe("UsageStatsPanel", () => {
     expect(
       screen.getByText("Quota window consumption (5-Hour vs Weekly, % of pool capacity)"),
     ).toBeInTheDocument();
+  });
+
+  it("fetches the accounts metric and renders per-account cards, chart, and table", async () => {
+    mockQueryData(
+      makeResponse({
+        metric: "accounts",
+        series: [],
+        accounts: [
+          makeAccountEntry(),
+          makeAccountEntry({
+            accountId: "acct-beta",
+            name: "beta@example.com",
+            planType: "max",
+            requests: 12,
+            inputTokens: 100_000,
+            outputTokens: 50_000,
+            cachedInputTokens: 4_567,
+            totalTokens: 150_000,
+            credits: 6.0,
+            capacityCredits: 0,
+            quotaPercent: 0,
+          }),
+        ],
+        summary: {
+          ...makeResponse().summary,
+          accountCount: 2,
+          secondaryCapacityCredits: 120,
+        },
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<UsageStatsPanel />);
+    // The mocked response belongs to the accounts metric, so the model series
+    // is empty and the initial tokens view shows its empty state.
+    expect(await screen.findByText("No usage data in the selected range")).toBeInTheDocument();
+
+    // "accounts" is a real API metric, not a frontend view like unitprice.
+    await user.click(screen.getByRole("button", { name: "Accounts" }));
+    expect(useUsageStatsMock).toHaveBeenLastCalledWith("today", "accounts", expect.anything());
+
+    expect(await screen.findByTestId("usage-stats-accounts-chart")).toBeInTheDocument();
+    expect(screen.getByText("Token usage by account")).toBeInTheDocument();
+
+    // Cards: active account count plus the shared token/credit totals and the
+    // summed weekly capacity.
+    const cards = screen.getAllByTestId("usage-stats-stat-card");
+    expect(cards).toHaveLength(4);
+    expect(cards[0].textContent).toContain("Active accounts");
+    expect(cards[0].textContent).toContain("2");
+    expect(cards[3].textContent).toContain("Weekly capacity (credits)");
+    expect(cards[3].textContent).toContain("120");
+
+    // One horizontal bar per account sized by total tokens, server order kept.
+    expect(capturedUnitPriceProps?.data?.map((row) => String(row.name))).toEqual([
+      "alpha@example.com",
+      "beta@example.com",
+    ]);
+    expect(capturedBars.map((bar) => bar.dataKey)).toEqual(["tokens"]);
+
+    // Table rows keyed by account: name, plan sub-line, tokens, credits.
+    const alphaRow = screen.getByTestId("usage-stats-row-acct-alpha");
+    expect(alphaRow.textContent).toContain("alpha@example.com");
+    expect(alphaRow.textContent).toContain("pro");
+    expect(alphaRow.textContent).toContain("1.05M");
+    expect(alphaRow.textContent).toContain("87.5%"); // 1.05M / 1.2M
+    expect(screen.getByTestId("usage-stats-row-acct-beta").textContent).toContain("beta@example.com");
+  });
+
+  it("shows the empty state for the accounts view when no accounts matched", async () => {
+    mockQueryData(makeResponse({ metric: "accounts", series: [], accounts: [] }));
+    const user = userEvent.setup();
+
+    render(<UsageStatsPanel />);
+    expect(await screen.findByText("No usage data in the selected range")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Accounts" }));
+    expect(useUsageStatsMock).toHaveBeenLastCalledWith("today", "accounts", expect.anything());
+
+    expect(screen.getByText("No usage data in the selected range")).toBeInTheDocument();
+    expect(screen.queryByTestId("usage-stats-accounts-chart")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("usage-stats-table-scroll")).not.toBeInTheDocument();
+  });
+
+  it("renders the weekly quota share only for accounts with capacity", async () => {
+    mockQueryData(
+      makeResponse({
+        metric: "accounts",
+        series: [],
+        accounts: [
+          makeAccountEntry(), // quotaPercent = 30 / 120 * 100 = 25.0
+          makeAccountEntry({
+            accountId: "acct-beta",
+            name: "beta@example.com",
+            planType: "max",
+            requests: 12,
+            inputTokens: 100_000,
+            outputTokens: 50_000,
+            cachedInputTokens: 4_567,
+            totalTokens: 150_000,
+            credits: 6.0,
+            capacityCredits: 0,
+            quotaPercent: 0,
+          }),
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(<UsageStatsPanel />);
+    expect(await screen.findByText("No usage data in the selected range")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Accounts" }));
+    expect(await screen.findByTestId("usage-stats-accounts-chart")).toBeInTheDocument();
+
+    const alphaRow = screen.getByTestId("usage-stats-row-acct-alpha");
+    expect(alphaRow.textContent).toContain("30"); // credits
+    expect(alphaRow).toHaveTextContent("Weekly quota 25.0%");
+
+    // Without capacity there is no quota share to derive: the credits cell
+    // keeps a dash sub-line while the credits total still renders.
+    const betaRow = screen.getByTestId("usage-stats-row-acct-beta");
+    expect(betaRow.textContent).toContain("6");
+    expect(betaRow.textContent).not.toContain("Weekly quota");
   });
 });

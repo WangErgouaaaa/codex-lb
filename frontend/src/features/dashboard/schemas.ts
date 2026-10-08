@@ -263,7 +263,7 @@ export const UsageStatsRangeSchema = z.enum(["today", "7d", "30d"]);
 export type UsageStatsRange = z.infer<typeof UsageStatsRangeSchema>;
 export const DEFAULT_USAGE_STATS_RANGE: UsageStatsRange = "today";
 
-export const UsageStatsMetricSchema = z.enum(["tokens", "credits", "cost", "window_credits"]);
+export const UsageStatsMetricSchema = z.enum(["tokens", "credits", "cost", "accounts", "window_credits"]);
 export type UsageStatsMetric = z.infer<typeof UsageStatsMetricSchema>;
 export const DEFAULT_USAGE_STATS_METRIC: UsageStatsMetric = "tokens";
 
@@ -288,6 +288,7 @@ const UsageStatsSummarySchema = z.object({
   totalPrimaryCredits: z.number().optional().default(0),
   primaryCapacityCredits: z.number().optional().default(0),
   secondaryCapacityCredits: z.number().optional().default(0),
+  accountCount: z.number().optional().default(0),
 });
 
 const UsageModelEntrySchema = z.object({
@@ -302,6 +303,21 @@ const UsageModelEntrySchema = z.object({
   credits: z.number().optional().default(0),
   attributedTokens: z.number().optional().default(0),
   attributedRequests: z.number().optional().default(0),
+});
+
+const UsageAccountEntrySchema = z.object({
+  accountId: z.string(),
+  name: z.string(),
+  planType: z.string().nullable().optional().default(""),
+  requests: z.number(),
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  cachedInputTokens: z.number(),
+  totalTokens: z.number(),
+  costUsd: z.number().optional().default(0),
+  credits: z.number().optional().default(0),
+  capacityCredits: z.number().optional().default(0),
+  quotaPercent: z.number().optional().default(0),
 });
 
 const UsageSeriesBucketSchema = z.object({
@@ -327,11 +343,13 @@ export const UsageStatsResponseSchema = z.object({
   byModel: z.array(UsageModelEntrySchema),
   series: z.array(UsageSeriesBucketSchema),
   windowSeries: z.array(UsageWindowSeriesBucketSchema).optional().default([]),
+  accounts: z.array(UsageAccountEntrySchema).optional().default([]),
   metric: UsageStatsMetricSchema.optional().default("tokens"),
 });
 
 export type UsageStatsSummary = z.infer<typeof UsageStatsSummarySchema>;
 export type UsageModelEntry = z.infer<typeof UsageModelEntrySchema>;
+export type UsageAccountEntry = z.infer<typeof UsageAccountEntrySchema>;
 export type UsageSeriesBucket = z.infer<typeof UsageSeriesBucketSchema>;
 export type UsageWindowSeriesBucket = z.infer<typeof UsageWindowSeriesBucketSchema>;
 export type UsageStatsResponse = z.infer<typeof UsageStatsResponseSchema>;

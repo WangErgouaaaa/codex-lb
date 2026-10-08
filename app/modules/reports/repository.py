@@ -98,6 +98,16 @@ class UsageModelBucketRow:
     cost_usd: float = 0.0
 
 
+@dataclass(frozen=True)
+class UsageAccountAggregateRow:
+    account_id: str
+    requests: int
+    input_tokens: int
+    output_tokens: int
+    cached_input_tokens: int
+    cost_usd: float
+
+
 class ReportsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -338,6 +348,47 @@ class ReportsRepository:
         return [
             UsageModelAggregateRow(
                 model=row.model,
+                requests=int(row.requests or 0),
+                input_tokens=int(row.input_tokens or 0),
+                output_tokens=int(row.output_tokens or 0),
+                cached_input_tokens=int(row.cached_input_tokens or 0),
+                cost_usd=float(row.cost_usd or 0.0),
+            )
+            for row in result.all()
+        ]
+
+    async def aggregate_usage_by_account(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> list[UsageAccountAggregateRow]:
+        output_tokens = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+        total_tokens_expr = func.coalesce(func.sum(RequestLog.input_tokens), 0) + func.coalesce(
+            func.sum(output_tokens), 0
+        )
+
+        stmt = (
+            select(
+                RequestLog.account_id,
+                func.count().label("requests"),
+                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+            )
+            .where(
+                and_(
+                    *_report_conditions(start_date, end_date, None, None, None),
+                    RequestLog.account_id.is_not(None),
+                )
+            )
+            .group_by(RequestLog.account_id)
+            .order_by(total_tokens_expr.desc())
+        )
+        result = await self._session.execute(stmt)
+        return [
+            UsageAccountAggregateRow(
+                account_id=row.account_id,
                 requests=int(row.requests or 0),
                 input_tokens=int(row.input_tokens or 0),
                 output_tokens=int(row.output_tokens or 0),

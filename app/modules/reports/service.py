@@ -12,6 +12,7 @@ from app.modules.reports.repository import (
     USAGE_BUCKET_HOUR,
     DailyReportRangeTooLargeError,
     ReportsRepository,
+    UsageAccountAggregateRow,
     build_usage_bucket_ranges,
 )
 from app.modules.reports.schemas import (
@@ -22,6 +23,7 @@ from app.modules.reports.schemas import (
     ReportComparisonPrevious,
     ReportsResponse,
     ReportSummary,
+    UsageAccountEntry,
     UsageModelEntry,
     UsageSeriesBucket,
     UsageStatsResponse,
@@ -29,7 +31,10 @@ from app.modules.reports.schemas import (
     UsageWindowSeriesBucket,
     UserAgentCostEntry,
 )
-from app.modules.usage.credit_aggregation import CreditAttributionRepository
+from app.modules.usage.credit_aggregation import (
+    CreditAccountAggregateRow,
+    CreditAttributionRepository,
+)
 from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
@@ -39,7 +44,7 @@ class InvalidReportDateRangeError(ValueError):
 
 
 USAGE_STATS_RANGES = ("today", "7d", "30d")
-USAGE_STATS_METRICS = ("tokens", "cost", "credits", "window_credits")
+USAGE_STATS_METRICS = ("tokens", "cost", "credits", "window_credits", "accounts")
 # Credits are read from the weekly window: it is the real subscription budget.
 CREDITS_WINDOW = "secondary"
 # The window_credits metric charts both quota windows as share-of-range lines.
@@ -219,11 +224,12 @@ class ReportsService:
         summary = await self._repository.aggregate_summary(start_at, end_at)
         model_rows = await self._repository.aggregate_usage_by_model(start_at, end_at)
         bucket_ranges = build_usage_bucket_ranges(start_date, end_date, timezone_info, bucket)
-        # The window_credits view charts per-window bucket series instead of
-        # per-model ones, so the model bucket query is skipped for it.
+        # The window_credits view charts per-window bucket series and the
+        # accounts view charts per-account bars, so the model bucket query
+        # is skipped for both.
         series_rows = (
             []
-            if metric == "window_credits"
+            if metric in ("window_credits", "accounts")
             else await self._repository.aggregate_usage_by_model_bucket(bucket_ranges)
         )
 
@@ -239,6 +245,7 @@ class ReportsService:
         total_primary_credits = 0.0
         pool_primary_capacity = 0.0
         pool_secondary_capacity = 0.0
+        account_credit_rows: list[CreditAccountAggregateRow] = []
         if self._credit_repository is not None:
             credit_rows = await self._credit_repository.aggregate_credits_by_model(start_at, end_at, CREDITS_WINDOW)
             credits_by_model = {row.model: row.credits_sum for row in credit_rows}
@@ -249,10 +256,52 @@ class ReportsService:
             if metric == "window_credits":
                 window_series, total_primary_credits = await self._build_window_series(bucket_ranges)
                 pool_primary_capacity, pool_secondary_capacity = await self._pool_window_capacities()
+            elif metric == "accounts":
+                account_credit_rows = await self._credit_repository.aggregate_credits_by_account(
+                    start_at, end_at, CREDITS_WINDOW
+                )
             else:
                 credit_bucket_rows = await self._credit_repository.aggregate_credits_by_model_bucket(
                     bucket_ranges, CREDITS_WINDOW
                 )
+
+        accounts: list[UsageAccountEntry] = []
+        if metric == "accounts":
+            account_rows: list[UsageAccountAggregateRow] = await self._repository.aggregate_usage_by_account(
+                start_at, end_at
+            )
+            usage_by_account = {row.account_id: row for row in account_rows}
+            credits_by_account_id = {row.account_id: row.credits_sum for row in account_credit_rows}
+            profiles = {account.id: account for account in await self._repository.list_accounts()}
+            for account_id in usage_by_account.keys() | credits_by_account_id.keys():
+                row = usage_by_account.get(account_id)
+                profile = profiles.get(account_id)
+                plan_type = profile.plan_type if profile else None
+                # quota_percent divides by the plan's nominal weekly capacity.
+                capacity = usage_core.capacity_for_plan(plan_type, "secondary") or 0.0
+                credits = credits_by_account_id.get(account_id, 0.0)
+                input_tokens = row.input_tokens if row else 0
+                output_tokens = row.output_tokens if row else 0
+                accounts.append(
+                    UsageAccountEntry(
+                        account_id=account_id,
+                        name=(profile.alias or profile.email or account_id[:8]) if profile else account_id[:8],
+                        plan_type=plan_type,
+                        requests=row.requests if row else 0,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cached_input_tokens=row.cached_input_tokens if row else 0,
+                        total_tokens=input_tokens + output_tokens,
+                        cost_usd=round(row.cost_usd, 4) if row else 0.0,
+                        credits=round(credits, 2),
+                        capacity_credits=capacity,
+                        quota_percent=round(credits / capacity * 100, 2) if capacity > 0 else 0.0,
+                    )
+                )
+            accounts.sort(key=lambda entry: entry.total_tokens, reverse=True)
+            # Reuse the window_credits capacity field: the accounts stat card
+            # shows the charted accounts' total nominal weekly capacity.
+            pool_secondary_capacity = sum(entry.capacity_credits for entry in accounts)
 
         # cached_input_tokens is a subset of input_tokens, so token totals
         # count input + output only — adding cached would double-count it.
@@ -265,6 +314,7 @@ class ReportsService:
             "cost": total_cost_usd,
             "credits": total_credits,
             "window_credits": total_credits,
+            "accounts": total_tokens,
         }
         metric_total = metric_totals[metric]
 
@@ -350,10 +400,12 @@ class ReportsService:
                 secondary_capacity_credits=round(pool_secondary_capacity, 2),
                 attributed_requests=attributed_requests,
                 total_attributed_tokens=sum(attributed_tokens_by_model.values()),
+                account_count=len(accounts),
             ),
             by_model=by_model,
             series=series,
             window_series=window_series,
+            accounts=accounts,
             metric=metric,
         )
 

@@ -51,7 +51,9 @@ async def get_reports(
 async def get_usage_stats(
     context: ReportsContext = Depends(get_reports_context),
     range: Annotated[Literal["today", "7d", "30d"], Query()] = "7d",
-    metric: Annotated[Literal["tokens", "cost", "credits", "window_credits"], Query()] = "tokens",
+    metric: Annotated[
+        Literal["tokens", "cost", "credits", "window_credits", "accounts"], Query()
+    ] = "tokens",
     report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
 ) -> UsageStatsResponse:
     return await context.service.get_usage_stats(

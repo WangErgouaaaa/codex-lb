@@ -9,7 +9,11 @@ from app.core.exceptions import ProxyModelNotAllowed
 from app.core.openai.model_registry import ModelRegistry
 from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy.request_policy import apply_api_key_enforcement, validate_model_access
+from app.modules.proxy.request_policy import (
+    apply_api_key_enforcement,
+    apply_api_key_enforcement_to_chat_payload,
+    validate_model_access,
+)
 
 
 @pytest.mark.parametrize(
@@ -243,3 +247,159 @@ def test_model_access_rejects_alias_when_canonical_model_not_allowed() -> None:
 
     with pytest.raises(ProxyModelNotAllowed):
         validate_model_access(api_key, "gpt-5.5-extra")
+
+
+def _tier_override_key(
+    *,
+    enforced_service_tier: str | None,
+    model_service_tier_overrides: dict[str, str] | None = None,
+    enforced_model: str | None = None,
+) -> ApiKeyData:
+    return cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-tier-overrides",
+            enforced_model=enforced_model,
+            enforced_reasoning_effort=None,
+            enforced_service_tier=enforced_service_tier,
+            model_service_tier_overrides=model_service_tier_overrides or {},
+        ),
+    )
+
+
+def _tier_request(model: str, *, service_tier: str | None = None) -> ResponsesRequest:
+    payload: dict[str, object] = {"model": model, "instructions": "", "input": []}
+    if service_tier is not None:
+        payload["service_tier"] = service_tier
+    return ResponsesRequest.model_validate(payload)
+
+
+def test_per_model_service_tier_override_wins_over_key_wide_tier() -> None:
+    request = _tier_request("gpt-6.1-sol")
+    api_key = _tier_override_key(
+        enforced_service_tier="flex",
+        model_service_tier_overrides={"gpt-6.1-sol": "priority"},
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert request.service_tier == "priority"
+
+
+def test_per_model_service_tier_override_applies_without_key_wide_tier() -> None:
+    api_key = _tier_override_key(
+        enforced_service_tier=None,
+        model_service_tier_overrides={"gpt-6.1-sol": "priority"},
+    )
+
+    hit = _tier_request("gpt-6.1-sol")
+    apply_api_key_enforcement(hit, api_key)
+    assert hit.service_tier == "priority"
+
+    miss = _tier_request("gpt-6.2-sol")
+    assert apply_api_key_enforcement(miss, api_key) is False
+    assert miss.service_tier is None
+
+
+def test_per_model_service_tier_miss_falls_back_to_key_wide_tier() -> None:
+    request = _tier_request("gpt-6.2-sol")
+    api_key = _tier_override_key(
+        enforced_service_tier="flex",
+        model_service_tier_overrides={"gpt-6.1-sol": "priority"},
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert request.service_tier == "flex"
+
+
+def test_per_model_service_tier_override_beats_alias_derived_fast_tier() -> None:
+    request = _tier_request("gpt-5.6-sol-extra-high-fast")
+    api_key = _tier_override_key(
+        enforced_service_tier=None,
+        model_service_tier_overrides={"gpt-5.6-sol": "flex"},
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert request.model == "gpt-5.6-sol"
+    assert request.service_tier == "flex"
+
+
+def test_per_model_default_override_omits_wire_service_tier() -> None:
+    request = _tier_request("gpt-6.1-sol")
+    api_key = _tier_override_key(
+        enforced_service_tier="priority",
+        model_service_tier_overrides={"gpt-6.1-sol": "default"},
+    )
+
+    was_enforced = apply_api_key_enforcement(request, api_key)
+
+    assert request.service_tier is None
+    assert was_enforced is True
+
+
+def test_per_model_override_overrides_explicit_client_tier() -> None:
+    request = _tier_request("gpt-6.1-sol", service_tier="flex")
+    api_key = _tier_override_key(
+        enforced_service_tier=None,
+        model_service_tier_overrides={"gpt-6.1-sol": "priority"},
+    )
+
+    was_enforced = apply_api_key_enforcement(request, api_key)
+
+    assert request.service_tier == "priority"
+    assert was_enforced is False
+
+
+def test_override_applies_to_enforced_model_rewrites() -> None:
+    request = _tier_request("gpt-6.1-sol")
+    api_key = _tier_override_key(
+        enforced_service_tier=None,
+        enforced_model="gpt-5.5",
+        model_service_tier_overrides={"gpt-5.5": "priority"},
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert request.model == "gpt-5.5"
+    assert request.service_tier == "priority"
+
+
+def test_chat_payload_per_model_tier_override_wins() -> None:
+    api_key = _tier_override_key(
+        enforced_service_tier="flex",
+        model_service_tier_overrides={"gpt-6.1-sol": "priority"},
+    )
+
+    payload: dict[str, object] = {"model": "gpt-6.1-sol", "service_tier": "flex"}
+    apply_api_key_enforcement_to_chat_payload(payload, api_key)
+    assert payload["service_tier"] == "priority"
+
+    miss_payload: dict[str, object] = {"model": "gpt-6.2-sol"}
+    apply_api_key_enforcement_to_chat_payload(miss_payload, api_key)
+    assert miss_payload["service_tier"] == "flex"
+
+
+def test_chat_payload_tier_override_matches_alias_and_case() -> None:
+    api_key = _tier_override_key(
+        enforced_service_tier=None,
+        model_service_tier_overrides={"gpt-5.6-sol": "flex"},
+    )
+
+    payload: dict[str, object] = {"model": "GPT-5.6-Sol-XHigh"}
+    apply_api_key_enforcement_to_chat_payload(payload, api_key)
+
+    assert payload["service_tier"] == "flex"
+
+
+def test_chat_payload_default_override_pops_service_tier() -> None:
+    api_key = _tier_override_key(
+        enforced_service_tier="priority",
+        model_service_tier_overrides={"gpt-6.1-sol": "auto"},
+    )
+
+    payload: dict[str, object] = {"model": "gpt-6.1-sol", "service_tier": "priority"}
+    apply_api_key_enforcement_to_chat_payload(payload, api_key)
+
+    assert "service_tier" not in payload

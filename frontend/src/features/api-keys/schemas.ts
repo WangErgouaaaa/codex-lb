@@ -30,8 +30,10 @@ const ApiKeyUsageSummarySchema = z.object({
   totalCostUsd: z.number().nonnegative().default(0),
 });
 
-const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
+export const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
 export type ServiceTierType = (typeof SERVICE_TIERS)[number];
+
+const modelServiceTierOverridesField = z.record(z.string(), z.enum(SERVICE_TIERS));
 
 export const TRAFFIC_CLASSES = ["foreground", "opportunistic"] as const;
 export type TrafficClass = (typeof TRAFFIC_CLASSES)[number];
@@ -57,6 +59,7 @@ export const ApiKeySchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .default(null),
+  modelServiceTierOverrides: modelServiceTierOverridesField.default({}),
   usageSections: z.string().default("upstream_limits,account_pool_usage"),
   expiresAt: z.iso.datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
@@ -93,6 +96,7 @@ export const ApiKeyCreateRequestSchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .optional(),
+  modelServiceTierOverrides: modelServiceTierOverridesField.nullable().optional(),
   usageSections: z.string().optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
@@ -117,6 +121,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
     .enum(SERVICE_TIERS)
     .nullable()
     .optional(),
+  modelServiceTierOverrides: modelServiceTierOverridesField.nullable().optional(),
   usageSections: z.string().optional(),
   weeklyTokenLimit: z.number().int().positive().nullable().optional(),
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),

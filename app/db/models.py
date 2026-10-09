@@ -1145,6 +1145,9 @@ class ApiKey(Base):
     enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    # JSON object {"<model-slug>": "<tier>"}; a matching request model uses
+    # the entry tier instead of the key-wide enforced_service_tier.
+    model_service_tier_overrides_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     traffic_class: Mapped[str] = mapped_column(
         String,
         default="foreground",

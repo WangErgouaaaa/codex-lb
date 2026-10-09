@@ -304,6 +304,7 @@ class ApiKeysRepository:
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
+        model_service_tier_overrides_json: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
@@ -336,6 +337,9 @@ class ApiKeysRepository:
         if enforced_service_tier is not _UNSET:
             assert enforced_service_tier is None or isinstance(enforced_service_tier, str)
             row.enforced_service_tier = enforced_service_tier
+        if model_service_tier_overrides_json is not _UNSET:
+            assert model_service_tier_overrides_json is None or isinstance(model_service_tier_overrides_json, str)
+            row.model_service_tier_overrides_json = model_service_tier_overrides_json
         if traffic_class is not _UNSET:
             assert isinstance(traffic_class, str)
             row.traffic_class = traffic_class

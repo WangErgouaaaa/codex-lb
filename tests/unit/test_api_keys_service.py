@@ -150,6 +150,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
+        model_service_tier_overrides_json: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
         usage_sections: str | _Unset = _UNSET,
@@ -174,6 +175,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
             "enforced_service_tier": enforced_service_tier,
+            "model_service_tier_overrides_json": model_service_tier_overrides_json,
             "traffic_class": traffic_class,
             "transport_policy_override": transport_policy_override,
             "usage_sections": usage_sections,
@@ -2510,3 +2512,103 @@ async def test_create_key_rejects_invalid_usage_sections() -> None:
                 usage_sections="bad_section",
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_create_key_persists_model_service_tier_overrides() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="tier-override-key",
+            allowed_models=None,
+            model_service_tier_overrides={"GPT-6.1-Sol": "PRIORITY", "gpt-5.6-sol-xhigh": "flex"},
+        )
+    )
+
+    assert created.model_service_tier_overrides == {"gpt-6.1-sol": "priority", "gpt-5.6-sol": "flex"}
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.model_service_tier_overrides_json == '{"gpt-6.1-sol": "priority", "gpt-5.6-sol": "flex"}'
+
+
+@pytest.mark.asyncio
+async def test_create_key_rejects_invalid_override_tier() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    with pytest.raises(ApiKeyValidationError, match="Unsupported enforced service tier 'turbo'"):
+        await service.create_key(
+            ApiKeyCreateData(
+                name="bad-tier-key",
+                allowed_models=None,
+                model_service_tier_overrides={"gpt-6.1-sol": "turbo"},
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_key_sets_and_clears_model_service_tier_overrides() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(ApiKeyCreateData(name="worker", allowed_models=None))
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            model_service_tier_overrides={"gpt-6.1-sol": "priority"},
+            model_service_tier_overrides_set=True,
+        ),
+    )
+    assert updated.model_service_tier_overrides == {"gpt-6.1-sol": "priority"}
+
+    cleared = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(model_service_tier_overrides=None, model_service_tier_overrides_set=True),
+    )
+    assert cleared.model_service_tier_overrides == {}
+
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.model_service_tier_overrides_json is None
+
+
+@pytest.mark.asyncio
+async def test_update_key_omitted_override_field_keeps_existing_map() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="worker",
+            allowed_models=None,
+            model_service_tier_overrides={"gpt-6.1-sol": "priority"},
+        )
+    )
+
+    updated = await service.update_key(created.id, ApiKeyUpdateData(name="renamed", name_set=True))
+
+    assert updated.name == "renamed"
+    assert updated.model_service_tier_overrides == {"gpt-6.1-sol": "priority"}
+
+
+@pytest.mark.asyncio
+async def test_read_side_parses_overrides_leniently() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(ApiKeyCreateData(name="worker", allowed_models=None))
+
+    row = await repo.get_by_id(created.id)
+    assert row is not None
+    row.model_service_tier_overrides_json = '{"gpt-6.1-sol": "priority", "gpt-6.2-sol": "turbo", "gpt-6.3-sol": null}'
+    reloaded = await service.get_key_by_id(created.id)
+    assert reloaded.model_service_tier_overrides == {"gpt-6.1-sol": "priority"}
+
+    row.model_service_tier_overrides_json = "not json"
+    reloaded = await service.get_key_by_id(created.id)
+    assert reloaded.model_service_tier_overrides == {}
+
+    row.model_service_tier_overrides_json = '["gpt-6.1-sol"]'
+    reloaded = await service.get_key_by_id(created.id)
+    assert reloaded.model_service_tier_overrides == {}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import time
 import uuid
@@ -37,6 +38,8 @@ from app.modules.api_keys.repository import (
     _Unset,
 )
 from app.modules.usage.repository import UsageRepository
+
+logger = logging.getLogger(__name__)
 
 _SQLITE_BUSY_RETRY_ATTEMPTS = 4
 _SQLITE_BUSY_RETRY_BASE_SECONDS = 0.1
@@ -86,6 +89,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         enforced_service_tier: str | None | _Unset = ...,
+        model_service_tier_overrides_json: str | None | _Unset = ...,
         traffic_class: str | _Unset = ...,
         transport_policy_override: str | None | _Unset = ...,
         usage_sections: str | _Unset = ...,
@@ -288,6 +292,7 @@ class ApiKeyCreateData:
     expires_at: datetime | None = None
     assigned_account_ids: list[str] | None = None
     assigned_source_ids: list[str] | None = None
+    model_service_tier_overrides: dict[str, str] | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
 
@@ -305,6 +310,8 @@ class ApiKeyUpdateData:
     enforced_reasoning_effort_set: bool = False
     enforced_service_tier: str | None = None
     enforced_service_tier_set: bool = False
+    model_service_tier_overrides: dict[str, str] | None = None
+    model_service_tier_overrides_set: bool = False
     traffic_class: str | None = None
     traffic_class_set: bool = False
     transport_policy_override: str | None = None
@@ -349,6 +356,7 @@ class ApiKeyData:
     source_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
     assigned_source_ids: list[str] = field(default_factory=list)
+    model_service_tier_overrides: dict[str, str] = field(default_factory=dict)
     pooled_credits: "PooledCreditData | None" = None
 
 
@@ -475,6 +483,7 @@ class ApiKeysService:
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
         enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
+        model_service_tier_overrides = _normalize_model_service_tier_overrides(payload.model_service_tier_overrides)
         traffic_class = _normalize_traffic_class(payload.traffic_class)
         transport_policy_override = _normalize_transport_policy_override(payload.transport_policy_override)
         usage_sections = _normalize_usage_sections(payload.usage_sections)
@@ -489,6 +498,7 @@ class ApiKeysService:
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             enforced_service_tier=enforced_service_tier,
+            model_service_tier_overrides_json=_serialize_model_service_tier_overrides(model_service_tier_overrides),
             account_assignment_scope_enabled=bool(assigned_account_ids),
             source_assignment_scope_enabled=bool(assigned_source_ids),
             traffic_class=traffic_class,
@@ -618,6 +628,12 @@ class ApiKeysService:
         else:
             enforced_service_tier = None
 
+        model_service_tier_overrides_update: str | None | _Unset = _UNSET
+        if payload.model_service_tier_overrides_set:
+            model_service_tier_overrides_update = _serialize_model_service_tier_overrides(
+                _normalize_model_service_tier_overrides(payload.model_service_tier_overrides)
+            )
+
         traffic_class_update: str | _Unset = _UNSET
         if payload.traffic_class_set:
             traffic_class_update = _normalize_traffic_class(payload.traffic_class)
@@ -671,6 +687,7 @@ class ApiKeysService:
                         enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
                     ),
                     enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
+                    model_service_tier_overrides_json=model_service_tier_overrides_update,
                     traffic_class=traffic_class_update,
                     transport_policy_override=transport_policy_override_update,
                     usage_sections=usage_sections,
@@ -717,6 +734,7 @@ class ApiKeysService:
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
             or payload.enforced_service_tier_set
+            or payload.model_service_tier_overrides_set
             or payload.traffic_class_set
             or payload.transport_policy_override_set
             or payload.usage_sections_set
@@ -1319,6 +1337,61 @@ def _normalize_allowed_models(allowed_models: list[str] | None) -> list[str] | N
     return [model.strip() for model in allowed_models if model and model.strip()]
 
 
+def _normalize_model_service_tier_key(model: str) -> str:
+    # Local import: request_policy imports ApiKeyData from this module, so a
+    # module-level import would be circular.
+    from app.modules.proxy.request_policy import resolve_model_alias
+
+    resolved = resolve_model_alias(model)
+    return (resolved or "").strip().lower()
+
+
+def _normalize_model_service_tier_overrides(overrides: dict[str, str] | None) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    if not overrides:
+        return normalized
+    for model, tier in overrides.items():
+        key = _normalize_model_service_tier_key(model)
+        if not key:
+            continue
+        normalized_tier = _normalize_service_tier(tier)
+        if normalized_tier is None:
+            options = ", ".join(sorted(_SUPPORTED_SERVICE_TIERS | {"fast"}))
+            raise ApiKeyValidationError(
+                f"Invalid service tier '{tier}' for model '{model}'. Expected one of: {options}"
+            )
+        normalized[key] = normalized_tier
+    return normalized
+
+
+def _serialize_model_service_tier_overrides(overrides: dict[str, str] | None) -> str | None:
+    if not overrides:
+        return None
+    return json.dumps(overrides)
+
+
+def _parse_model_service_tier_overrides(payload: str | None) -> dict[str, str]:
+    if not payload:
+        return {}
+    try:
+        parsed = json.loads(payload)
+    except (TypeError, ValueError):
+        logger.warning("api_key_model_service_tier_overrides_unparseable")
+        return {}
+    if not isinstance(parsed, dict):
+        logger.warning("api_key_model_service_tier_overrides_unexpected_shape")
+        return {}
+    overrides: dict[str, str] = {}
+    for model, tier in parsed.items():
+        if not isinstance(model, str) or not isinstance(tier, str):
+            continue
+        key = _normalize_model_service_tier_key(model)
+        normalized_tier = _normalize_service_tier_lenient(tier)
+        if key and normalized_tier:
+            overrides[key] = normalized_tier
+    return overrides
+
+
 def _normalize_assigned_account_ids(account_ids: list[str] | None) -> list[str]:
     if not account_ids:
         return []
@@ -1651,6 +1724,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         enforced_service_tier=data.enforced_service_tier,
+        model_service_tier_overrides=data.model_service_tier_overrides,
         traffic_class=data.traffic_class,
         transport_policy_override=data.transport_policy_override,
         usage_sections=data.usage_sections,
@@ -1688,6 +1762,9 @@ def _to_api_key_data(
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         enforced_service_tier=_normalize_service_tier_lenient(row.enforced_service_tier),
+        model_service_tier_overrides=_parse_model_service_tier_overrides(
+            getattr(row, "model_service_tier_overrides_json", None)
+        ),
         traffic_class=_normalize_traffic_class_lenient(getattr(row, "traffic_class", TRAFFIC_CLASS_FOREGROUND)),
         transport_policy_override=_normalize_transport_policy_override_lenient(
             getattr(row, "transport_policy_override", None)

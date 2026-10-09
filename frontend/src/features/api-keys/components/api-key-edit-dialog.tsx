@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/select";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
+import { ModelServiceTierOverridesEditor } from "@/features/api-keys/components/model-service-tier-overrides-editor";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
 import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
@@ -89,6 +90,19 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
   return nextIds.some((accountId) => !initialIdSet.has(accountId));
 }
 
+function hasTierOverridesChange(
+  initial: Record<string, ServiceTierType>,
+  next: Record<string, ServiceTierType>,
+): boolean {
+  const initialModels = Object.keys(initial);
+  const nextModels = Object.keys(next);
+  if (initialModels.length !== nextModels.length) {
+    return true;
+  }
+
+  return nextModels.some((model) => initial[model] !== next[model]);
+}
+
 type ApiKeyEditDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
@@ -101,6 +115,7 @@ type ApiKeyEditDraft = {
   enforcedModel: string;
   enforcedReasoningEffort: string;
   enforcedServiceTier: string;
+  modelServiceTierOverrides: Record<string, ServiceTierType>;
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
 };
@@ -118,6 +133,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     enforcedModel: apiKey.enforcedModel || "",
     enforcedReasoningEffort: apiKey.enforcedReasoningEffort || "none",
     enforcedServiceTier: apiKey.enforcedServiceTier || "none",
+    modelServiceTierOverrides: apiKey.modelServiceTierOverrides ?? {},
     trafficClass: apiKey.trafficClass || "foreground",
     transportPolicyOverride: apiKey.transportPolicyOverride,
   };
@@ -182,6 +198,10 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     }
     if (hasLimitRuleChanges(initialLimitRules, draft.limitRules)) {
       payload.limits = normalizedLimits;
+    }
+    if (hasTierOverridesChange(apiKey.modelServiceTierOverrides ?? {}, draft.modelServiceTierOverrides)) {
+      payload.modelServiceTierOverrides =
+        Object.keys(draft.modelServiceTierOverrides).length > 0 ? draft.modelServiceTierOverrides : null;
     }
     try {
       await onSubmit(payload);
@@ -309,6 +329,17 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                   <SelectItem value="flex">{t("common.serviceTier.flex")}</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">{t("apiKeys.form.modelServiceTierOverrides")}</div>
+              <p className="text-xs text-muted-foreground">
+                {t("apiKeys.form.modelServiceTierOverridesHint")}
+              </p>
+              <ModelServiceTierOverridesEditor
+                value={draft.modelServiceTierOverrides}
+                onChange={(modelServiceTierOverrides) => updateDraft({ modelServiceTierOverrides })}
+              />
             </div>
 
             <div className="space-y-1">

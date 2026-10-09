@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import Field
 
@@ -24,6 +25,8 @@ class LimitRuleResponse(DashboardModel):
     reset_at: datetime
 
 
+_SERVICE_TIER_VALUE = Annotated[str, Field(pattern=r"(?i)^(auto|default|priority|flex|fast)$")]
+
 class ApiKeyCreateRequest(DashboardModel):
     name: str = Field(min_length=1, max_length=128)
     allowed_models: list[str] | None = None
@@ -33,6 +36,11 @@ class ApiKeyCreateRequest(DashboardModel):
         default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh|max|ultra)$"
     )
     enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
+    model_service_tier_overrides: dict[str, _SERVICE_TIER_VALUE] | None = Field(
+        default=None,
+        description="Per-model service tier overrides; a matching request model uses the entry tier "
+        "instead of the key-wide enforced_service_tier.",
+    )
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
     transport_policy_override: str | None = None
     usage_sections: str | None = None
@@ -52,6 +60,7 @@ class ApiKeyUpdateRequest(DashboardModel):
         default=None, pattern=r"(?i)^(none|minimal|low|medium|high|xhigh|max|ultra)$"
     )
     enforced_service_tier: str | None = Field(default=None, pattern=r"(?i)^(auto|default|priority|flex|fast)$")
+    model_service_tier_overrides: dict[str, _SERVICE_TIER_VALUE] | None = None
     traffic_class: str | None = Field(default=None, pattern=r"(?i)^(foreground|opportunistic)$")
     transport_policy_override: str | None = None
     usage_sections: str | None = None
@@ -80,6 +89,7 @@ class ApiKeyResponse(DashboardModel):
     enforced_model: str | None
     enforced_reasoning_effort: str | None
     enforced_service_tier: str | None
+    model_service_tier_overrides: dict[str, str] = Field(default_factory=dict)
     traffic_class: str
     transport_policy_override: str | None = None
     usage_sections: str = "upstream_limits,account_pool_usage"

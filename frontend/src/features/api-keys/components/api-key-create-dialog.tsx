@@ -27,6 +27,7 @@ import { AccountMultiSelect } from "@/features/api-keys/components/account-multi
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
+import { ModelServiceTierOverridesEditor } from "@/features/api-keys/components/model-service-tier-overrides-editor";
 import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
 import { ModelSourceMultiSelect } from "@/features/model-sources/components/model-source-multi-select";
 import type {
@@ -72,6 +73,7 @@ type ApiKeyCreateDraft = {
   enforcedModel: string;
   enforcedReasoningEffort: string;
   enforcedServiceTier: string;
+  modelServiceTierOverrides: Record<string, ServiceTierType>;
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
   applyToCodexModel: boolean;
@@ -87,6 +89,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   enforcedModel: "",
   enforcedReasoningEffort: "none",
   enforcedServiceTier: "none",
+  modelServiceTierOverrides: {},
   trafficClass: "foreground",
   transportPolicyOverride: null,
   applyToCodexModel: false,
@@ -126,6 +129,9 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
           ? null
           : draft.enforcedReasoningEffort as ReasoningEffortType,
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
+      ...(Object.keys(draft.modelServiceTierOverrides).length > 0
+        ? { modelServiceTierOverrides: draft.modelServiceTierOverrides }
+        : {}),
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,
       expiresAt: draft.expiresAt?.toISOString(),
@@ -240,6 +246,17 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                   <SelectItem value="flex">{t("common.serviceTier.flex")}</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">{t("apiKeys.form.modelServiceTierOverrides")}</div>
+              <p className="text-xs text-muted-foreground">
+                {t("apiKeys.form.modelServiceTierOverridesHint")}
+              </p>
+              <ModelServiceTierOverridesEditor
+                value={draft.modelServiceTierOverrides}
+                onChange={(modelServiceTierOverrides) => updateDraft({ modelServiceTierOverrides })}
+              />
             </div>
 
             <div className="space-y-1">

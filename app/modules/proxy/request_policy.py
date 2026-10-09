@@ -125,6 +125,21 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 
 
+def _resolve_enforced_service_tier(api_key: ApiKeyData, model: str | None) -> str | None:
+    """Resolve the enforced service tier for a request's effective model.
+
+    A per-model ``model_service_tier_overrides`` entry (stored with keys
+    normalized the same way) wins over the key-wide ``enforced_service_tier``.
+    """
+    overrides = getattr(api_key, "model_service_tier_overrides", None)
+    if overrides:
+        resolved_model = resolve_model_alias(model)
+        normalized = (resolved_model or "").strip().lower()
+        if normalized and normalized in overrides:
+            return overrides[normalized]
+    return api_key.enforced_service_tier
+
+
 def apply_api_key_enforcement(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
@@ -188,7 +203,8 @@ def apply_api_key_enforcement(
     normalize_unsupported_reasoning_effort(payload)
 
     service_tier_was_enforced = False
-    if api_key.enforced_service_tier is not None:
+    enforced_service_tier = _resolve_enforced_service_tier(api_key, payload.model)
+    if enforced_service_tier is not None:
         requested_service_tier = getattr(payload, "service_tier", None)
         service_tier_was_enforced = requested_service_tier is None or (
             requested_service_tier.strip().lower() in _UPSTREAM_OMIT_SERVICE_TIERS
@@ -199,21 +215,22 @@ def apply_api_key_enforcement(
         # already means "use upstream default") so the enforcement
         # actually reaches upstream instead of failing with
         # ``Unsupported service_tier``. See issue #546.
-        if api_key.enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
+        if enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
             effective_service_tier: str | None = None
         else:
-            effective_service_tier = api_key.enforced_service_tier
+            effective_service_tier = enforced_service_tier
         setattr(payload, "service_tier", effective_service_tier)
-        if requested_service_tier != api_key.enforced_service_tier:
+        if requested_service_tier != enforced_service_tier:
             logger.info(
                 "api_key_service_tier_enforced request_id=%s key_id=%s "
                 "requested_service_tier=%s enforced_service_tier=%s "
-                "outbound_service_tier=%s",
+                "outbound_service_tier=%s model=%s",
                 get_request_id(),
                 api_key.id,
                 requested_service_tier,
-                api_key.enforced_service_tier,
+                enforced_service_tier,
                 effective_service_tier,
+                payload.model,
             )
     return service_tier_was_enforced
 
@@ -321,11 +338,12 @@ def apply_api_key_enforcement_to_chat_payload(
         else:
             payload["reasoning"] = {"effort": enforced_effort}
 
-    if api_key.enforced_service_tier is not None:
-        if api_key.enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
+    enforced_service_tier = _resolve_enforced_service_tier(api_key, payload.get("model"))
+    if enforced_service_tier is not None:
+        if enforced_service_tier in _UPSTREAM_OMIT_SERVICE_TIERS:
             payload.pop("service_tier", None)
         else:
-            payload["service_tier"] = api_key.enforced_service_tier
+            payload["service_tier"] = enforced_service_tier
 
 
 def resolve_model_alias(model: str | None) -> str | None:

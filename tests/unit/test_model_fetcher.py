@@ -114,6 +114,12 @@ async def test_fetch_models_for_plan_uses_resolved_codex_route(monkeypatch: pyte
     assert client.calls[0]["route"] is route
     assert client.calls[0]["method"] == "GET"
     assert str(client.calls[0]["url"]).endswith("/codex/models?client_version=0.128.0")
+    # The CLI's /codex/models GET carries the default client identity (UA +
+    # originator) plus the provider version header, matching the URL query.
+    headers = client.calls[0]["headers"]
+    assert headers["User-Agent"].startswith("codex_cli_rs/0.128.0 ")
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["version"] == "0.128.0"
     assert models[0].raw["model_messages"] == {
         "instructions_template": "You are a coding assistant.",
         "instructions_variables": {"personality_default": ""},

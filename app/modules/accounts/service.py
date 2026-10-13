@@ -23,6 +23,7 @@ from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.clients.http import lease_http_session
+from app.core.clients.proxy import codex_persona_headers
 from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse,
     UsageFetchError,
@@ -795,10 +796,14 @@ class AccountsService:
         if "/backend-api" not in base:
             base = f"{base}/backend-api"
         url = f"{base}/codex/responses"
+        # The probe hits the main responses endpoint with account credentials,
+        # so it must carry the same codex_cli_rs persona as the proxy egress
+        # instead of aiohttp's default Python UA.
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "text/event-stream",
             "Content-Type": "application/json",
+            **codex_persona_headers(),
         }
         if chatgpt_account_id and not chatgpt_account_id.startswith(("email_", "local_")):
             headers["chatgpt-account-id"] = chatgpt_account_id

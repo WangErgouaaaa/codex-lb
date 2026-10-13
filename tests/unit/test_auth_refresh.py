@@ -104,3 +104,57 @@ def test_classify_refresh_error_token_expired_is_permanent():
 
 def test_classify_refresh_error_temporary():
     assert classify_refresh_error("temporary_error") is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_access_token_sends_cli_auth_client_fingerprint(monkeypatch):
+    """The CLI refreshes via its default auth client (UA + originator, no
+    version header) with a body of only grant_type/client_id/refresh_token."""
+    from app.core.auth import refresh as refresh_module
+
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status = 400
+
+        async def json(self, content_type=None):
+            return {"error": {"message": "invalid_grant"}}
+
+        async def text(self):
+            return "invalid_grant"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Session:
+        def post(self, url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return _Response()
+
+    class _Lease:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(refresh_module, "lease_http_session", lambda session=None: _Lease())
+
+    with pytest.raises(RefreshError):
+        await refresh_module.refresh_access_token("refresh-token", allow_direct_egress=True)
+
+    assert captured["url"].endswith("/oauth/token")
+    body = captured["json"]
+    assert body["grant_type"] == "refresh_token"
+    assert body["refresh_token"] == "refresh-token"
+    # The CLI's refresh body has no scope field (codex-rs login oauth client).
+    assert "scope" not in body
+    headers = captured["headers"]
+    assert headers["User-Agent"].startswith("codex_cli_rs/")
+    assert headers["originator"] == "codex_cli_rs"
+    # The auth client carries no version header.
+    assert "version" not in headers

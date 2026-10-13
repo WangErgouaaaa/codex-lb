@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.core.clients.proxy import codex_persona_headers
 from app.core.utils.request_id import get_request_id
 
 
@@ -18,6 +19,10 @@ def build_chatgpt_auth_headers(
     headers: dict[str, str] = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
+        # The CLI's backend-client (usage/reset-credits) egress carries its UA;
+        # a bare Python aiohttp UA on account-scoped endpoints is a fingerprint
+        # the real client never produces.
+        **codex_persona_headers(originator=False, include_version=False),
     }
     request_id = get_request_id()
     if request_id:

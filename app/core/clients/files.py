@@ -38,7 +38,11 @@ import aiohttp
 from app.core.clients.codex import CodexClient, create_codex_session, require_route_or_direct_egress_opt_in
 from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import lease_http_session
-from app.core.clients.proxy import _strip_minimal_egress_fingerprint_headers, build_codex_user_agent
+from app.core.clients.proxy import (
+    _CODEX_CLI_ORIGINATOR,
+    _strip_minimal_egress_fingerprint_headers,
+    build_codex_user_agent,
+)
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
 from app.core.types import JsonValue
@@ -153,7 +157,10 @@ def _build_files_headers(
     headers["Content-Type"] = "application/json"
     if account_id:
         headers["chatgpt-account-id"] = account_id
+    # The CLI's /files egress goes through its default client, which always
+    # carries originator alongside the UA.
     headers["User-Agent"] = build_codex_user_agent(get_codex_version_cache().cached_version_or_default())
+    headers["originator"] = _CODEX_CLI_ORIGINATOR
     for key, value in inbound.items():
         lower = key.lower()
         if lower == "user-agent":

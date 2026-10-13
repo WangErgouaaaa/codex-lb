@@ -247,7 +247,9 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert fake_connection.sent == ["hello"]
     assert seen["url"] == "wss://chatgpt.com/backend-api/codex/responses"
     kwargs = cast(dict[str, object], seen["kwargs"])
-    assert kwargs["origin"] == "https://chatgpt.com"
+    # The real CLI never sends Origin, so the handshake must omit it entirely
+    # (origin=None -> no Origin header) even when the inbound request had one.
+    assert kwargs["origin"] is None
     # Fork behavior (unify-upstream-fingerprint): every egress is normalized to
     # the shared codex_cli_rs persona, so the inbound "Codex CLI Test" UA is
     # rewritten before the websocket handshake. Version comes from the settings

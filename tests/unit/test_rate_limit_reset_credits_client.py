@@ -160,6 +160,9 @@ async def test_fetch_reset_credits_sends_bearer_and_account_id_headers() -> None
     assert state.headers is not None
     assert state.headers["Authorization"] == "Bearer access-token"
     assert state.headers["chatgpt-account-id"] == "acc_workspace"
+    # The CLI's backend-client carries its UA on usage/reset-credits egresses;
+    # a bare Python aiohttp UA never appears on account-scoped endpoints.
+    assert state.headers["User-Agent"].startswith("codex_cli_rs/")
 
 
 @pytest.mark.asyncio

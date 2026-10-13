@@ -352,6 +352,9 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route
     assert client.calls[0]["json"]["model"] == "gpt-5.2"
+    # The real CLI tags compaction subagent requests with this header
+    # (codex-api SubAgent::Compact -> "compact").
+    assert client.calls[0]["headers"]["x-openai-subagent"] == "compact"
     assert trace.endpoint_id == "ep_1"
 
 
@@ -1025,7 +1028,9 @@ async def test_responses_websocket_uses_codex_client_when_route_is_resolved(rout
     # Fork behavior: the inbound Codex UA is normalized to the shared persona
     # (canonical OS/arch/terminal) like every other client.
     assert client.calls[0]["headers"]["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
-    assert client.calls[0]["headers"]["Origin"] == "https://chatgpt.test"
+    # The real CLI never sends Origin; the browser-family header must not
+    # reach the upstream websocket handshake.
+    assert "Origin" not in client.calls[0]["headers"]
     assert client.websocket.sent == ['{"type":"response.create"}']
     assert client.context.exited is True
     assert client.closed is False

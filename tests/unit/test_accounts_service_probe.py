@@ -340,3 +340,9 @@ async def test_send_probe_request_uses_shared_http_client(monkeypatch):
     assert captured["timeout"].total == 30.0
     assert captured["timeout"].connect is None
     assert captured["timeout"].sock_connect == 10.0
+    # The probe hits the main responses endpoint with account credentials, so
+    # it must carry the shared codex_cli_rs persona instead of aiohttp's
+    # default Python UA.
+    assert captured["headers"]["User-Agent"].startswith("codex_cli_rs/")
+    assert captured["headers"]["originator"] == "codex_cli_rs"
+    assert captured["headers"]["version"]

@@ -30,6 +30,7 @@ from app.core.clients.codex import (
 )
 from app.core.clients.proxy import (
     _HOP_BY_HOP_HEADER_NAMES,
+    _ensure_responses_websocket_beta_header,
     CODEX_INSTALLATION_ID_HEADER,
     ProxyResponseError,
     _normalize_non_native_upstream_fingerprint,
@@ -59,9 +60,6 @@ _WEBSOCKET_HOP_BY_HOP_HEADERS = _HOP_BY_HOP_HEADER_NAMES | frozenset(
         "sec-websocket-version",
     }
 )
-_RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
-_RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS = frozenset({"responses=experimental"})
-
 logger = logging.getLogger(__name__)
 
 
@@ -442,19 +440,6 @@ def _build_upstream_websocket_headers(
         headers["chatgpt-account-id"] = account_id
     _ensure_responses_websocket_beta_header(headers)
     return headers
-
-
-def _ensure_responses_websocket_beta_header(headers: dict[str, str]) -> None:
-    header_key = next((key for key in headers if key.lower() == "openai-beta"), "openai-beta")
-    current_value = headers.get(header_key, "")
-    beta_tokens = [
-        token.strip()
-        for token in current_value.split(",")
-        if token.strip() and token.strip().lower() not in _RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS
-    ]
-    if _RESPONSES_WEBSOCKET_BETA_HEADER.lower() not in {token.lower() for token in beta_tokens}:
-        beta_tokens.append(_RESPONSES_WEBSOCKET_BETA_HEADER)
-    headers[header_key] = ", ".join(beta_tokens)
 
 
 def _pop_header_case_insensitive(headers: dict[str, str], name: str) -> str | None:

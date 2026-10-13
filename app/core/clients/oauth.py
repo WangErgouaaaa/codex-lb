@@ -34,6 +34,12 @@ from app.core.utils.request_id import get_request_id
 
 logger = logging.getLogger(__name__)
 
+# The real CLI's authorization-code and device-flow clients are bare reqwest
+# builds without a User-Agent (``codex-rs/login/src/server.rs`` and
+# ``device_code_auth.rs``); suppressing aiohttp's auto-added Python UA keeps
+# these pre-auth egresses at parity instead of a third hybrid shape.
+_NO_USER_AGENT = ("User-Agent",)
+
 
 @dataclass(frozen=True)
 class DeviceCode:
@@ -139,6 +145,7 @@ async def exchange_authorization_code(
             data=encoded,
             headers=headers,
             timeout=timeout_seconds or settings.oauth_timeout_seconds,
+            skip_auto_headers=_NO_USER_AGENT,
         )
         data = await _safe_codex_json(resp)
         payload = _validate_oauth_token_payload(data, "OAuth token response invalid")
@@ -153,6 +160,7 @@ async def exchange_authorization_code(
             data=encoded,
             headers=headers,
             timeout=timeout,
+            skip_auto_headers=_NO_USER_AGENT,
         ) as resp:
             data = await _safe_json(resp)
             try:
@@ -209,6 +217,7 @@ async def request_device_code(
             json=payload,
             headers=headers,
             timeout=timeout_seconds or settings.oauth_timeout_seconds,
+            skip_auto_headers=_NO_USER_AGENT,
         )
         data = await _safe_codex_json(resp)
         status = _codex_status(resp)
@@ -227,7 +236,13 @@ async def request_device_code(
         payload_data = _validate_device_code_payload(data)
     else:
         async with lease_http_session(session) as client_session:
-            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            async with client_session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+                skip_auto_headers=_NO_USER_AGENT,
+            ) as resp:
                 data = await _safe_json(resp)
                 if resp.status >= 400:
                     if resp.status == 404:
@@ -303,6 +318,7 @@ async def exchange_device_token(
             json=payload,
             headers=headers,
             timeout=timeout_seconds or settings.oauth_timeout_seconds,
+            skip_auto_headers=_NO_USER_AGENT,
         )
         data = await _safe_codex_json(resp)
         payload_data = _validate_oauth_token_payload(data, "Device auth response invalid")
@@ -318,7 +334,13 @@ async def exchange_device_token(
             return None
     else:
         async with lease_http_session(session) as client_session:
-            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            async with client_session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+                skip_auto_headers=_NO_USER_AGENT,
+            ) as resp:
                 data = await _safe_json(resp)
                 payload_data = _validate_oauth_token_payload(data, "Device auth response invalid")
                 if resp.status in (403, 404):

@@ -103,6 +103,12 @@ IGNORE_INBOUND_HEADERS = {
     "x-real-ip",
     CODEX_INSTALLATION_ID_HEADER,
     "true-client-ip",
+    # Browser/device fingerprints the Codex CLI never sends; forwarding them
+    # would contradict the shared codex_cli_rs persona upstream.
+    "x-oai-attestation",
+    "origin",
+    "referer",
+    "accept-language",
 }
 INTERNAL_OPENAI_UPSTREAM_HEADERS = frozenset(
     {
@@ -564,6 +570,12 @@ def _should_drop_inbound_header(name: str) -> bool:
         return True
     if normalized.startswith("cf-"):
         return True
+    if normalized.startswith("sec-"):
+        # Sec-Fetch-*/sec-ch-ua fetch metadata is browser-only and the Codex
+        # CLI never sends it. sec-websocket-* is covered too: those are
+        # artifacts of the *downstream* handshake, and every upstream websocket
+        # path regenerates its own handshake headers.
+        return True
     return False
 
 
@@ -671,6 +683,48 @@ def build_codex_user_agent(version: str) -> str:
     Codex client version resolved by the caller.
     """
     return f"{_CODEX_CLI_ORIGINATOR}/{version} ({_FINGERPRINT_OS}; {_FINGERPRINT_ARCH}) {_FINGERPRINT_TERMINAL}"
+
+
+def codex_persona_headers(
+    version: str | None = None,
+    *,
+    originator: bool = True,
+    include_version: bool = True,
+) -> dict[str, str]:
+    """Build the shared codex_cli_rs identity headers for auxiliary egresses.
+
+    ``User-Agent`` plus (optionally) ``originator`` and ``version``, mirroring
+    which header set the real Codex CLI sends per endpoint family: API calls
+    carry all three, auth-client calls (token refresh) carry UA+originator,
+    and backend-client calls (usage) carry the UA alone. ``version`` defaults
+    to the cached live Codex client version.
+    """
+    resolved = version or get_codex_version_cache().cached_version_or_default()
+    headers = {"User-Agent": build_codex_user_agent(resolved)}
+    if originator:
+        headers["originator"] = _CODEX_CLI_ORIGINATOR
+    if include_version:
+        headers["version"] = resolved
+    return headers
+
+
+# The real Codex CLI sends this header on every responses websocket handshake
+# (``codex-rs/core/src/client.rs``) and never on the HTTP path.
+_RESPONSES_WEBSOCKET_BETA_HEADER = "responses_websockets=2026-02-06"
+_RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS = frozenset({"responses=experimental"})
+
+
+def _ensure_responses_websocket_beta_header(headers: dict[str, str]) -> None:
+    header_key = next((key for key in headers if key.lower() == "openai-beta"), "openai-beta")
+    current_value = headers.get(header_key, "")
+    beta_tokens = [
+        token.strip()
+        for token in current_value.split(",")
+        if token.strip() and token.strip().lower() not in _RESPONSES_WEBSOCKET_INCOMPATIBLE_BETA_HEADERS
+    ]
+    if _RESPONSES_WEBSOCKET_BETA_HEADER.lower() not in {token.lower() for token in beta_tokens}:
+        beta_tokens.append(_RESPONSES_WEBSOCKET_BETA_HEADER)
+    headers[header_key] = ", ".join(beta_tokens)
 
 
 def _is_native_codex_user_agent(user_agent: str | None) -> bool:
@@ -796,7 +850,10 @@ def _build_upstream_transcribe_headers(
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
         headers["chatgpt-account-id"] = account_id
+    # The real CLI's /transcribe egress goes through its default client, which
+    # always carries originator alongside the UA.
     headers["User-Agent"] = build_codex_user_agent(get_codex_version_cache().cached_version_or_default())
+    headers["originator"] = _CODEX_CLI_ORIGINATOR
     for key, value in inbound.items():
         lower = key.lower()
         if lower == "user-agent":
@@ -838,6 +895,10 @@ def _build_upstream_websocket_headers(
     headers["Authorization"] = f"Bearer {access_token}"
     if account_id:
         headers["chatgpt-account-id"] = account_id
+    # The real CLI sends the websocket beta header on every WS handshake; the
+    # direct-WS egress (proxy_websocket) already enforces it, so the
+    # auto-transport handshake must match instead of forking the two shapes.
+    _ensure_responses_websocket_beta_header(headers)
     return headers
 
 
@@ -3690,6 +3751,9 @@ class _CompactCommandTransport:
             upstream_account_id,
             accept="text/event-stream",
         )
+        # The real CLI tags its compaction subagent requests with this header
+        # (``codex-api/src/requests/headers.rs`` SubAgent::Compact -> "compact").
+        upstream_headers["x-openai-subagent"] = "compact"
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)

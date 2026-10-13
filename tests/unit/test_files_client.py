@@ -118,6 +118,9 @@ async def test_create_file_returns_upstream_json_on_success() -> None:
     # persona and fingerprint headers (x-codex-version, x-openai-client-*) are
     # stripped instead of forwarded; bulk inbound auth is still not forwarded.
     assert sent_headers["User-Agent"] == "codex_cli_rs/0.142.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10"
+    # The CLI's /files egress goes through its default client, which always
+    # carries originator alongside the UA.
+    assert sent_headers["originator"] == "codex_cli_rs"
     assert "x-codex-version" not in sent_headers
     assert "x-openai-client-version" not in sent_headers
     body = json.loads(call["data"])

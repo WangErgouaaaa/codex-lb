@@ -14,6 +14,7 @@ from app.core.clients.codex import (
 )
 from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import lease_http_session
+from app.core.clients.proxy import codex_persona_headers
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.types import JsonValue
@@ -122,6 +123,10 @@ async def fetch_models_for_plan(
     headers: dict[str, str] = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/json",
+        # The CLI's /codex/models GET carries the default client identity
+        # (UA + originator) plus the provider's version header; the version
+        # matches the client_version already echoed in the URL query.
+        **codex_persona_headers(version=client_version),
     }
     if account_id:
         headers["chatgpt-account-id"] = account_id

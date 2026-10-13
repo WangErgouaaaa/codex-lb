@@ -25,7 +25,8 @@ from app.core.clients.codex import (
     require_route_or_direct_egress_opt_in,
 )
 from app.core.clients.http import lease_http_session
-from app.core.config.settings import AUTH_BASE_URL, OAUTH_CLIENT_ID, OAUTH_SCOPE, get_settings
+from app.core.clients.proxy import codex_persona_headers
+from app.core.config.settings import AUTH_BASE_URL, OAUTH_CLIENT_ID, get_settings
 from app.core.resilience.network_recovery import (
     PROCESS_NETWORK_UNAVAILABLE_CODE,
     is_pre_dispatch_connection_failure,
@@ -212,15 +213,19 @@ async def refresh_access_token(
 ) -> TokenRefreshResult:
     settings = get_settings()
     url = f"{AUTH_BASE_URL}/oauth/token"
+    # The real CLI's refresh body carries only grant_type/client_id/
+    # refresh_token (``codex-rs/login/src/oauth/client.rs``); sending a
+    # narrower scope than the granted one also risks RFC 6749 §6 downgrade.
     payload = {
         "grant_type": "refresh_token",
         "client_id": OAUTH_CLIENT_ID,
         "refresh_token": refresh_token,
-        "scope": OAUTH_SCOPE,
     }
     timeout = aiohttp.ClientTimeout(total=_effective_token_refresh_timeout(settings.token_refresh_timeout_seconds))
 
-    headers: dict[str, str] = {}
+    # The CLI refreshes via its default auth client: originator + UA, no
+    # version header (``codex-rs/login/src/auth/manager.rs``).
+    headers: dict[str, str] = dict(codex_persona_headers(include_version=False))
     request_id = get_request_id()
     if request_id:
         headers["x-request-id"] = request_id

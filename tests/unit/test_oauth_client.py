@@ -84,3 +84,97 @@ def test_build_authorization_url_allows_explicit_originator_override():
     parsed = urllib.parse.urlparse(url)
     query = urllib.parse.parse_qs(parsed.query)
     assert query["originator"] == ["codex_cli_rs"]
+
+
+@pytest.mark.asyncio
+async def test_device_code_request_omits_user_agent_header(monkeypatch):
+    """The CLI's device-flow client is a bare reqwest build without a
+    User-Agent; the pre-auth egress must not carry aiohttp's Python UA."""
+    from app.core.clients import oauth as oauth_module
+    from app.core.clients.oauth import OAuthError, request_device_code
+
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status = 400
+
+        async def json(self, content_type=None):
+            return {"error": {"message": "temporarily_unavailable"}}
+
+        async def text(self):
+            return "temporarily_unavailable"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Session:
+        def post(self, url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return _Response()
+
+    class _Lease:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(oauth_module, "lease_http_session", lambda session=None: _Lease())
+
+    with pytest.raises(OAuthError):
+        await request_device_code(allow_direct_egress=True)
+
+    assert captured["url"].endswith("/api/accounts/deviceauth/usercode")
+    assert captured["skip_auto_headers"] == ("User-Agent",)
+
+
+@pytest.mark.asyncio
+async def test_authorization_code_exchange_omits_user_agent_header(monkeypatch):
+    from app.core.clients import oauth as oauth_module
+    from app.core.clients.oauth import OAuthError, exchange_authorization_code
+
+    captured: dict[str, object] = {}
+
+    class _Response:
+        status = 400
+
+        async def json(self, content_type=None):
+            return {"error": {"message": "invalid_grant"}}
+
+        async def text(self):
+            return "invalid_grant"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Session:
+        def post(self, url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return _Response()
+
+    class _Lease:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(oauth_module, "lease_http_session", lambda session=None: _Lease())
+
+    with pytest.raises(OAuthError):
+        await exchange_authorization_code(
+            code="code",
+            code_verifier="verifier",
+            allow_direct_egress=True,
+        )
+
+    assert captured["url"].endswith("/oauth/token")
+    assert captured["skip_auto_headers"] == ("User-Agent",)

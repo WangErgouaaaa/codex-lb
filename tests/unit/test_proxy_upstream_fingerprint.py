@@ -281,3 +281,75 @@ def test_upstream_log_account_id_lookup_is_case_insensitive():
     assert _account_id_for_upstream_log({"chatgpt-account-id": "acct-9"}) == "acct-9"
     assert _account_id_for_upstream_log({"CHATGPT-ACCOUNT-ID": "acct-9"}) == "acct-9"
     assert _account_id_for_upstream_log({"User-Agent": "x"}) is None
+
+
+def test_browser_and_device_fingerprint_headers_never_reach_upstream():
+    # Browser stacks (and only browser stacks) send Origin/Referer/
+    # Accept-Language/Sec-Fetch-*/sec-ch-ua on their fetches, and the macOS
+    # desktop app attaches x-oai-attestation device tokens. The shared
+    # codex_cli_rs persona never carries any of these, so the HTTP egress
+    # must drop them.
+    inbound = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0",
+        "Origin": "https://chatgpt.com",
+        "Referer": "https://chatgpt.com/codex",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Fetch-Dest": "empty",
+        "sec-ch-ua": '"Chromium";v="140"',
+        "x-oai-attestation": "v1.devicecheck-token",
+        "session_id": "sess-1",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers(inbound, "tok", None)
+
+    lowered = {key.lower() for key in headers}
+    assert "origin" not in lowered
+    assert "referer" not in lowered
+    assert "accept-language" not in lowered
+    assert "sec-fetch-mode" not in lowered
+    assert "sec-fetch-site" not in lowered
+    assert "sec-fetch-dest" not in lowered
+    assert "sec-ch-ua" not in lowered
+    assert "x-oai-attestation" not in lowered
+    # Legitimate continuity headers still pass.
+    assert headers["session_id"] == "sess-1"
+
+
+def test_direct_websocket_egress_drops_browser_and_attestation_headers():
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers as build_direct_ws
+
+    inbound = {
+        "User-Agent": "Mozilla/5.0",
+        "Origin": "https://chatgpt.com",
+        "Sec-Fetch-Mode": "cors",
+        "x-oai-attestation": "v1.devicecheck-token",
+        "x-codex-turn-state": "abc",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = build_direct_ws(inbound, "tok", None)
+
+    lowered = {key.lower() for key in headers}
+    assert "origin" not in lowered
+    assert "sec-fetch-mode" not in lowered
+    assert "x-oai-attestation" not in lowered
+    assert headers["x-codex-turn-state"] == "abc"
+
+
+def test_auto_transport_websocket_builder_adds_responses_websocket_beta_header():
+    # The real CLI sends `OpenAI-Beta: responses_websockets=2026-02-06` on
+    # every WS handshake (and never on HTTP). The direct-WS egress already
+    # enforced it; the auto-transport handshake must match instead of forking
+    # the two websocket shapes.
+    from app.core.clients.proxy import _build_upstream_websocket_headers as build_auto_ws
+
+    native_ua = "codex_cli_rs/0.142.0 (Mac OS 27.0.0; arm64) iTerm.app/3.6.10"
+    inbound = {"User-Agent": native_ua, "OpenAI-Beta": "responses=experimental"}
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = build_auto_ws(inbound, "tok", None)
+
+    beta = {key.lower(): value for key, value in headers.items()}["openai-beta"]
+    tokens = [token.strip() for token in beta.split(",")]
+    assert "responses_websockets=2026-02-06" in tokens
+    assert "responses=experimental" not in tokens

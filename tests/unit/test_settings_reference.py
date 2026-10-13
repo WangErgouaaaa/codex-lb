@@ -46,7 +46,10 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # number when fields are removed; never raise it without a simplicity-budget
 # discussion — every new CODEX_LB_* setting needs a why-not-a-default
 # justification per CONTRIBUTING.md's simplicity gates.
-MAX_SETTINGS_FIELDS = 123
+# 123 -> 126: bio-policy burst guard (3 fields) shipped without regenerating
+# this ratchet; 126 -> 127: codex_session_header_synthesis_enabled (N10
+# session/thread header synthesis, env-killable behavioral default).
+MAX_SETTINGS_FIELDS = 127
 
 
 def test_generated_settings_reference_matches_code() -> None:

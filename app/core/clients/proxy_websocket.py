@@ -30,7 +30,9 @@ from app.core.clients.codex import (
 )
 from app.core.clients.proxy import (
     _HOP_BY_HOP_HEADER_NAMES,
+    _codex_session_synthesis_enabled,
     _ensure_responses_websocket_beta_header,
+    apply_codex_session_headers,
     CODEX_INSTALLATION_ID_HEADER,
     ProxyResponseError,
     _normalize_non_native_upstream_fingerprint,
@@ -423,11 +425,13 @@ def _build_upstream_websocket_headers(
     )
     if installation_id:
         headers[CODEX_INSTALLATION_ID_HEADER] = installation_id
-    lower_keys = {key.lower() for key in headers}
-    if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
-        request_id = get_request_id()
-        if request_id:
-            headers["x-request-id"] = request_id
+    synthesis_enabled = _codex_session_synthesis_enabled()
+    if not synthesis_enabled:
+        lower_keys = {key.lower() for key in headers}
+        if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
+            request_id = get_request_id()
+            if request_id:
+                headers["x-request-id"] = request_id
     # Normalize every client's fingerprint on the client-facing
     # ``/v1/responses`` websocket egress too (fork behavior: one shared persona
     # on all egresses). This builder is the upstream egress for a direct
@@ -439,6 +443,10 @@ def _build_upstream_websocket_headers(
     if account_id:
         headers["chatgpt-account-id"] = account_id
     _ensure_responses_websocket_beta_header(headers)
+    if synthesis_enabled:
+        # Same per-account session/thread derivation as the HTTP egress, so a
+        # direct-WS downstream session never leaks one id across accounts.
+        apply_codex_session_headers(headers, account_id)
     return headers
 
 

@@ -355,6 +355,12 @@ class Settings(BaseSettings):
     max_decompressed_responses_body_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
     image_inline_fetch_enabled: bool = True
     image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Derive outbound ``session-id``/``thread-id``/``x-client-request-id`` per
+    # (account, downstream session) on every responses egress. Keeps SDK
+    # traffic shaped like a real CLI session and prevents one downstream
+    # session's ids from appearing out of multiple pool accounts after a
+    # failover. Disable to restore raw pass-through of client session headers.
+    codex_session_header_synthesis_enabled: bool = True
     # OpenAI Images API compatibility (POST /v1/images/{generations,edits})
     # ``images_default_model`` is the public model returned to clients when
     # they omit ``model``; it must remain in the ``gpt-image-*`` family. The

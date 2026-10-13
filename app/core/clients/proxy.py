@@ -727,6 +727,111 @@ def _ensure_responses_websocket_beta_header(headers: dict[str, str]) -> None:
     headers[header_key] = ", ".join(beta_tokens)
 
 
+# --- Session/thread header synthesis (N10) -----------------------------------
+#
+# The real Codex CLI sends ``session-id`` + ``thread-id`` (and
+# ``x-client-request-id`` = thread id) on every responses request. The gateway
+# used to pass these through, which both left SDK traffic without them and let
+# one downstream session's ids appear from multiple pool accounts after a
+# failover -- an account-pool correlation signal upstream. Synthesis derives
+# the outbound ids deterministically from (account, downstream session), so
+# they are stable per account and always change on failover.
+
+# Inbound headers consulted (in order) to identify the downstream session.
+_SESSION_HEADER_SOURCE_KEYS: tuple[str, ...] = (
+    "session-id",
+    "session_id",
+    "x-codex-session-id",
+    "x-codex-conversation-id",
+    "thread-id",
+    "x-opencode-session",
+    "x-session-id",
+    "x-parent-session-id",
+    "x-session-affinity",
+)
+# Non-canonical inbound variants removed from the egress; the real CLI only
+# ever sends the canonical hyphenated pair (which is re-derived, so inbound
+# spellings of it are dropped too).
+_SESSION_HEADER_VARIANT_KEYS: tuple[str, ...] = (
+    "session-id",
+    "session_id",
+    "thread-id",
+    "thread_id",
+    "x-codex-session-id",
+    "x-codex-conversation-id",
+    "x-client-request-id",
+    "x-request-id",
+    "request-id",
+)
+_SESSION_SOURCE_FALLBACK = "session"
+_SESSION_UNACCOUNTED_KEY = "unaccounted"
+
+
+def _codex_session_synthesis_enabled() -> bool:
+    # getattr default keeps narrow test settings stubs (SimpleNamespace) and
+    # any pre-migration settings snapshot on the default-on behavior.
+    return bool(getattr(get_settings(), "codex_session_header_synthesis_enabled", True))
+
+
+def _derive_session_uuid(account_key: str, namespace: str, source: str) -> str:
+    digest = hashlib.sha256(f"{account_key}|{namespace}|{source}".encode()).digest()
+    hexed = digest[:16].hex()
+    return f"{hexed[:8]}-{hexed[8:12]}-{hexed[12:16]}-{hexed[16:20]}-{hexed[20:32]}"
+
+
+def _pop_headers_case_insensitive(headers: dict[str, str], names: tuple[str, ...]) -> dict[str, str]:
+    lowered = {name.lower() for name in names}
+    popped = {}
+    for key in list(headers.keys()):
+        if key.lower() in lowered:
+            popped[key.lower()] = headers.pop(key)
+    return popped
+
+
+def _session_header_source(headers: Mapping[str, str]) -> tuple[str, str]:
+    """Return ``(session_source, thread_source)`` from inbound header variants."""
+    session_source = ""
+    thread_source = ""
+    for key in _SESSION_HEADER_SOURCE_KEYS:
+        value = next((v for k, v in headers.items() if k.lower() == key), "")
+        if isinstance(value, str) and value.strip():
+            if not session_source:
+                session_source = value.strip()
+            if key == "thread-id" and not thread_source:
+                thread_source = value.strip()
+            if session_source and thread_source:
+                break
+    if not session_source:
+        session_source = _SESSION_SOURCE_FALLBACK
+    if not thread_source:
+        thread_source = session_source
+    return session_source, thread_source
+
+
+def apply_codex_session_headers(
+    headers: dict[str, str],
+    account_key: str | None,
+    *,
+    thread_namespace: str = "thread",
+) -> None:
+    """Rewrite the canonical session/thread header trio in place.
+
+    ``session-id`` is derived from ``(account_key, "session", source)`` and
+    ``thread-id`` from ``(account_key, thread_namespace, thread_source)``,
+    with ``x-client-request-id`` mirroring the thread id like the real CLI.
+    Derivation is a pure function, so ids are stable across restarts for the
+    same (account, downstream session) pair and always differ per account.
+    Subagent requests (compact) pass ``thread_namespace="compact"`` so their
+    sub-thread never collides with the parent thread's id.
+    """
+    key = account_key or _SESSION_UNACCOUNTED_KEY
+    session_source, thread_source = _session_header_source(headers)
+    _pop_headers_case_insensitive(headers, _SESSION_HEADER_VARIANT_KEYS)
+    headers["session-id"] = _derive_session_uuid(key, "session", session_source)
+    headers["thread-id"] = _derive_session_uuid(key, thread_namespace, thread_source)
+    headers["x-client-request-id"] = headers["thread-id"]
+
+
 def _is_native_codex_user_agent(user_agent: str | None) -> bool:
     if not user_agent:
         return False
@@ -792,11 +897,15 @@ def _build_upstream_headers(
     accept: str = "text/event-stream",
 ) -> dict[str, str]:
     headers = filter_inbound_headers(inbound)
-    lower_keys = {key.lower() for key in headers}
-    if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
-        request_id = get_request_id()
-        if request_id:
-            headers["x-request-id"] = request_id
+    synthesis_enabled = _codex_session_synthesis_enabled()
+    if not synthesis_enabled:
+        # Legacy behavior: keep the gateway-injected x-request-id (the real CLI
+        # sends x-client-request-id instead; synthesis owns that when enabled).
+        lower_keys = {key.lower() for key in headers}
+        if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
+            request_id = get_request_id()
+            if request_id:
+                headers["x-request-id"] = request_id
     # Unconditional persona rewrite (fork behavior, unify-upstream-fingerprint):
     # native Codex clients are normalized too, so every request leaves this
     # egress with the same shared codex_cli_rs fingerprint.
@@ -806,6 +915,11 @@ def _build_upstream_headers(
     headers["Content-Type"] = "application/json"
     if account_id:
         headers["chatgpt-account-id"] = account_id
+    if synthesis_enabled:
+        # Session/thread ids are derived per (account, downstream session) so
+        # they never cross accounts on failover and SDK traffic never lacks
+        # them; inbound x-request-id variants are dropped here as well.
+        apply_codex_session_headers(headers, account_id)
     return headers
 
 
@@ -880,11 +994,13 @@ def _build_upstream_websocket_headers(
     blocked_header_names = _HOP_BY_HOP_HEADER_NAMES | connected_header_tokens
     filtered = filter_inbound_headers(inbound)
     headers = {key: value for key, value in filtered.items() if key.lower() not in blocked_header_names}
-    lower_keys = {key.lower() for key in headers}
-    if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
-        request_id = get_request_id()
-        if request_id:
-            headers["x-request-id"] = request_id
+    synthesis_enabled = _codex_session_synthesis_enabled()
+    if not synthesis_enabled:
+        lower_keys = {key.lower() for key in headers}
+        if "x-request-id" not in lower_keys and "request-id" not in lower_keys:
+            request_id = get_request_id()
+            if request_id:
+                headers["x-request-id"] = request_id
     # Normalize every client's fingerprint regardless of transport (fork
     # behavior: one shared persona on all egresses). The ``auto`` transport
     # routes a turn-state continuity follow-up onto the websocket path even
@@ -899,6 +1015,8 @@ def _build_upstream_websocket_headers(
     # direct-WS egress (proxy_websocket) already enforces it, so the
     # auto-transport handshake must match instead of forking the two shapes.
     _ensure_responses_websocket_beta_header(headers)
+    if synthesis_enabled:
+        apply_codex_session_headers(headers, account_id)
     return headers
 
 
@@ -3754,6 +3872,10 @@ class _CompactCommandTransport:
         # The real CLI tags its compaction subagent requests with this header
         # (``codex-api/src/requests/headers.rs`` SubAgent::Compact -> "compact").
         upstream_headers["x-openai-subagent"] = "compact"
+        if _codex_session_synthesis_enabled():
+            # The compact subagent runs in its own thread: re-derive the thread
+            # pair under a dedicated namespace while keeping the session id.
+            apply_codex_session_headers(upstream_headers, upstream_account_id, thread_namespace="compact")
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)

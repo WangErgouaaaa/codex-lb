@@ -313,8 +313,12 @@ def test_browser_and_device_fingerprint_headers_never_reach_upstream():
     assert "sec-fetch-dest" not in lowered
     assert "sec-ch-ua" not in lowered
     assert "x-oai-attestation" not in lowered
-    # Legitimate continuity headers still pass.
-    assert headers["session_id"] == "sess-1"
+    # The inbound session header is consumed as the derivation source and
+    # replaced by the canonical synthesized trio (see synthesis tests below).
+    assert "session_id" not in lowered
+    assert "session-id" in lowered
+    assert "thread-id" in lowered
+    assert headers["x-client-request-id"] == headers["thread-id"]
 
 
 def test_direct_websocket_egress_drops_browser_and_attestation_headers():
@@ -353,3 +357,130 @@ def test_auto_transport_websocket_builder_adds_responses_websocket_beta_header()
     tokens = [token.strip() for token in beta.split(",")]
     assert "responses_websockets=2026-02-06" in tokens
     assert "responses=experimental" not in tokens
+
+
+# --- Session/thread header synthesis (N10) -----------------------------------
+
+import re as _re
+
+_UUID_RE = _re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def test_synthesis_derives_canonical_trio_from_cli_session_headers():
+    inbound = {"User-Agent": "codex_cli_rs/0.142.0", "session-id": "cli-sess", "thread-id": "cli-thread"}
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers(inbound, "tok", "acct-A")
+
+    assert _UUID_RE.match(headers["session-id"])
+    assert _UUID_RE.match(headers["thread-id"])
+    assert headers["x-client-request-id"] == headers["thread-id"]
+    # The inbound values are rewritten, not forwarded.
+    assert headers["session-id"] != "cli-sess"
+    assert headers["thread-id"] != "cli-thread"
+
+
+def test_synthesis_is_stable_and_account_scoped():
+    def build(account):
+        inbound = {"User-Agent": "codex_cli_rs/0.142.0", "session-id": "same-downstream-session"}
+        with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+            return _build_upstream_headers(inbound, "tok", account)
+
+    first = build("acct-A")
+    again = build("acct-A")
+    other = build("acct-B")
+
+    # Stable for the same (account, downstream session) across calls.
+    assert first["session-id"] == again["session-id"]
+    assert first["thread-id"] == again["thread-id"]
+    # Different per account: a failover to another account can never reuse
+    # the same ids upstream (no cross-account correlation).
+    assert first["session-id"] != other["session-id"]
+    assert first["thread-id"] != other["thread-id"]
+
+
+def test_synthesis_consumes_sdk_session_variants_and_drops_request_ids():
+    inbound = {
+        "User-Agent": "opencode/1.18.35",
+        "x-opencode-session": "oc-sess",
+        "x-request-id": "sdk-rid",
+    }
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        headers = _build_upstream_headers(inbound, "tok", "acct-A")
+
+    lowered = {key.lower() for key in headers}
+    # The real CLI never sends these shapes; the SDK variant is folded into
+    # the derivation source instead of being forwarded.
+    assert "x-opencode-session" in lowered or headers["session-id"]
+    assert "x-request-id" not in lowered
+    assert "request-id" not in lowered
+    assert "x-client-request-id" in lowered
+
+
+def test_synthesis_falls_back_to_stable_session_when_no_source():
+    inbound = {"User-Agent": "OpenAI/Python 2.24.0"}
+
+    def build(account):
+        with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+            return _build_upstream_headers(dict(inbound), "tok", account)
+
+    bare = build("acct-A")
+    assert _UUID_RE.match(bare["session-id"])
+    assert bare["x-client-request-id"] == bare["thread-id"]
+    # Header-less SDK traffic degrades to one stable per-account session,
+    # identical across requests instead of churning random ids.
+    assert build("acct-A")["session-id"] == bare["session-id"]
+
+
+def test_synthesis_covers_auto_and_direct_websocket_builders():
+    from app.core.clients.proxy import _build_upstream_websocket_headers as build_auto_ws
+    from app.core.clients.proxy_websocket import _build_upstream_websocket_headers as build_direct_ws
+
+    inbound = {"User-Agent": "codex_cli_rs/0.142.0", "session-id": "ws-sess"}
+    with patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"):
+        auto = build_auto_ws(dict(inbound), "tok", "acct-A")
+        direct = build_direct_ws(dict(inbound), "tok", "acct-A")
+
+    for headers in (auto, direct):
+        assert _UUID_RE.match(headers["session-id"])
+        assert headers["x-client-request-id"] == headers["thread-id"]
+    # Both websocket paths derive from the same (account, source) pair, so a
+    # transport switch does not mint a new session id mid-conversation.
+    assert auto["session-id"] == direct["session-id"]
+    assert auto["thread-id"] == direct["thread-id"]
+
+
+def test_synthesis_disabled_restores_passthrough_and_request_id_injection():
+    inbound = {
+        "User-Agent": "codex_cli_rs/0.142.0",
+        "session-id": "cli-sess",
+        "thread-id": "cli-thread",
+        "session_id": "sdk-sess",
+    }
+    with (
+        patch.object(proxy_module, "_codex_session_synthesis_enabled", return_value=False),
+        patch.object(proxy_module.get_codex_version_cache(), "cached_version_or_default", return_value="0.142.0"),
+    ):
+        headers = _build_upstream_headers(inbound, "tok", "acct-A")
+
+    # Legacy behavior: raw pass-through of client session headers and the
+    # gateway-injected x-request-id (contextvar is empty in tests -> absent).
+    assert headers["session-id"] == "cli-sess"
+    assert headers["thread-id"] == "cli-thread"
+    assert headers["session_id"] == "sdk-sess"
+    assert "x-client-request-id" not in headers
+
+
+def test_synthesis_subagent_namespace_keeps_session_but_splits_thread():
+    from app.core.clients.proxy import apply_codex_session_headers
+
+    main = {"session-id": "cli-sess", "thread-id": "cli-thread"}
+    sub = dict(main)
+
+    apply_codex_session_headers(main, "acct-A")
+    apply_codex_session_headers(sub, "acct-A", thread_namespace="compact")
+
+    # The compact subagent shares the session but runs in its own thread,
+    # mirroring the real CLI's subagent threading.
+    assert sub["session-id"] == main["session-id"]
+    assert sub["thread-id"] != main["thread-id"]
+    assert sub["x-client-request-id"] == sub["thread-id"]

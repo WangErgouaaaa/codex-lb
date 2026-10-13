@@ -16,7 +16,7 @@ from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, _SESSION_UNACCOUNTED_KEY, _derive_session_uuid
 from app.core.clients.proxy_websocket import (
     CodexResponsesWebSocket,
     UpstreamWebSocketTransportError,
@@ -264,7 +264,9 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert additional_headers["Authorization"] == "Bearer access-token"
     assert additional_headers["chatgpt-account-id"] == "account-123"
     assert additional_headers["openai-beta"] == "responses_websockets=2026-02-06"
-    assert additional_headers["session_id"] == "session-1"
+    assert additional_headers["session-id"] == _derive_session_uuid("account-123", "session", "session-1")
+    assert additional_headers["x-client-request-id"] == additional_headers["thread-id"]
+    assert "session_id" not in {key.lower() for key in additional_headers}
     assert "Cookie" not in additional_headers
     assert "User-Agent" not in additional_headers
     assert "Origin" not in additional_headers
@@ -484,7 +486,8 @@ async def test_connect_responses_websocket_drops_http_responses_beta_and_encodin
     ):
         assert header_name not in lowered_headers
     assert additional_headers["OpenAI-Beta"] == "assistants=v2, responses_websockets=2026-02-06"
-    assert additional_headers["session_id"] == "session-1"
+    assert additional_headers["session-id"] == _derive_session_uuid(_SESSION_UNACCOUNTED_KEY, "session", "session-1")
+    assert "session_id" not in {key.lower() for key in additional_headers}
 
 
 @pytest.mark.asyncio

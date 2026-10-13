@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 123 settings. Every setting is an environment
+codex-lb currently exposes 127 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -169,7 +169,7 @@ the host side of the compose `ports` mapping instead.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` | `dict[str, int]` | `{}` |
-| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | `str` | `'0.144.0'` |
+| `CODEX_LB_MODEL_REGISTRY_CLIENT_VERSION` | `str` | `'0.155.1'` |
 | `CODEX_LB_MODEL_REGISTRY_ENABLED` | `bool` | `True` |
 | `CODEX_LB_MODEL_REGISTRY_SNAPSHOT_MAX_AGE_SECONDS` | `int` | `86400` |
 
@@ -243,6 +243,10 @@ the host side of the compose `ports` mapping instead.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_API_KEY_ACCOUNT_ASSIGNMENT_DRAIN_SECONDS` | `int` | `1800` |
+| `CODEX_LB_BIO_POLICY_BURST_ERROR_CODES` | `frozenset[str]` | `frozenset({'bio_policy'})` |
+| `CODEX_LB_BIO_POLICY_BURST_THRESHOLD` | `int` | `5` |
+| `CODEX_LB_BIO_POLICY_BURST_WINDOW_SECONDS` | `int` | `900` |
+| `CODEX_LB_CODEX_SESSION_HEADER_SYNTHESIS_ENABLED` | `bool` | `True` |
 | `CODEX_LB_HTTP_BRIDGE_CHECKPOINT_REPLAY_ENABLED` | `bool` | `True` |
 | `CODEX_LB_HTTP_BRIDGE_CHECKPOINT_TTL_SECONDS` | `float` | `604800` |
 | `CODEX_LB_HTTP_BRIDGE_OWNER_UNAVAILABLE_FRESH_RESEND_ENABLED` | `bool` | `True` |

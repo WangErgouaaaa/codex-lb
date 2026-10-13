@@ -355,6 +355,9 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     # The real CLI tags compaction subagent requests with this header
     # (codex-api SubAgent::Compact -> "compact").
     assert client.calls[0]["headers"]["x-openai-subagent"] == "compact"
+    # Session synthesis: compact keeps the session id namespace but derives
+    # its own subagent thread pair.
+    assert client.calls[0]["headers"]["x-client-request-id"] == client.calls[0]["headers"]["thread-id"]
     assert trace.endpoint_id == "ep_1"
 
 

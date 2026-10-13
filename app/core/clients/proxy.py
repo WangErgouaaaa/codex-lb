@@ -774,8 +774,13 @@ def _codex_session_synthesis_enabled() -> bool:
 
 
 def _derive_session_uuid(account_key: str, namespace: str, source: str) -> str:
-    digest = hashlib.sha256(f"{account_key}|{namespace}|{source}".encode()).digest()
-    hexed = digest[:16].hex()
+    digest = bytearray(hashlib.sha256(f"{account_key}|{namespace}|{source}".encode()).digest()[:16])
+    # Shape as RFC 4122 version 4 like the real CLI's uuid::Uuid::new_v4
+    # session/thread ids, so the derived form is not distinguishable by
+    # version nibble.
+    digest[6] = (digest[6] & 0x0F) | 0x40
+    digest[8] = (digest[8] & 0x3F) | 0x80
+    hexed = digest.hex()
     return f"{hexed[:8]}-{hexed[8:12]}-{hexed[12:16]}-{hexed[16:20]}-{hexed[20:32]}"
 
 

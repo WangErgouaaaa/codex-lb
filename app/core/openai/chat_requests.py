@@ -180,6 +180,19 @@ class ChatCompletionsRequest(BaseModel):
         data["tools"] = tools
         if tool_choice is not None:
             data["tool_choice"] = tool_choice
+        # Field-set parity with the real Codex CLI egress: its requests always
+        # carry reasoning settings and ask for encrypted reasoning content, so
+        # a translated chat request without either is distinguishable by body
+        # shape alone. Only applied when the caller expressed no preference
+        # (an explicit ``reasoning_effort`` already built ``reasoning`` above,
+        # and the officeai override inspects the original chat request so its
+        # precedence is unaffected).
+        if data.get("reasoning") is None:
+            data["reasoning"] = {"effort": "high", "summary": "auto"}
+        include = list(data.get("include") or [])
+        if "reasoning.encrypted_content" not in include:
+            include.append("reasoning.encrypted_content")
+        data["include"] = include
         return ResponsesRequest.model_validate(data)
 
 

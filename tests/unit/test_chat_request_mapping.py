@@ -938,3 +938,42 @@ def test_chat_rejects_unknown_message_role():
     }
     with pytest.raises(ValidationError, match="Unsupported message role"):
         ChatCompletionsRequest.model_validate(payload)
+
+
+def test_chat_defaults_fill_reasoning_and_include_for_field_set_parity():
+    # Field-set parity with the real Codex CLI egress: a chat-completions
+    # request that expresses no reasoning preference still leaves upstream
+    # with reasoning settings and the encrypted-reasoning include the CLI
+    # always carries.
+    payload = {"model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}]}
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    assert responses.reasoning is not None
+    assert responses.reasoning.effort == "high"
+    assert responses.reasoning.summary == "auto"
+    assert "reasoning.encrypted_content" in responses.include
+
+
+def test_chat_explicit_reasoning_effort_is_not_overridden():
+    payload = {
+        "model": "gpt-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "low",
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    assert responses.reasoning is not None
+    assert responses.reasoning.effort == "low"
+    # The include parity merge still applies.
+    assert "reasoning.encrypted_content" in responses.include
+
+
+def test_chat_responses_shaped_passthrough_gets_no_reasoning_default():
+    payload = {
+        "model": "gpt-5.2",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+    }
+    req = ChatCompletionsRequest.model_validate(payload)
+    responses = req.to_responses_request()
+    assert responses.reasoning is None
+    assert responses.include == []

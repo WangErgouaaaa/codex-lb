@@ -163,7 +163,11 @@ def test_disabled_or_nonmatching_api_key_scope_is_ignored(tmp_path: Path) -> Non
         )
         is None
     )
-    assert responses.reasoning is None
+    # The chat translation now defaults reasoning to {high, auto} for field-set
+    # parity; officeai not firing means that default is untouched.
+    assert responses.reasoning is not None
+    assert responses.reasoning.effort == "high"
+    assert responses.reasoning.summary == "auto"
 
     _write_control(control_path, enabled=True, api_key_prefix="sk-clb-office")
     assert (
@@ -176,4 +180,8 @@ def test_disabled_or_nonmatching_api_key_scope_is_ignored(tmp_path: Path) -> Non
         )
         is None
     )
-    assert responses.reasoning is None
+    # The chat translation now defaults reasoning to {high, auto} for field-set
+    # parity; officeai not firing means that default is untouched.
+    assert responses.reasoning is not None
+    assert responses.reasoning.effort == "high"
+    assert responses.reasoning.summary == "auto"

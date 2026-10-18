@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQLITE_BUSY_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_MS / 1000
 
+# Bounded wait for a shielded DB cleanup whose caller was already cancelled.
+# If the cleanup itself is stuck (e.g. on a dead greenlet bridge) the wait is
+# abandoned and logged instead of hanging the cancelled coroutine forever.
+_CLEANUP_HUNG_TIMEOUT_SECONDS = 5.0
+
 # PostgreSQL pool checkout timeout and connection recycle window. Fixed
 # application constants (issue #1340): recycle keeps pooled connections
 # younger than any reasonable server/proxy keep-alive boundary, and neither
@@ -171,13 +176,44 @@ def _startup_sqlite_check_mode(raw_mode: str) -> SqliteIntegrityCheckMode | None
     return SqliteIntegrityCheckMode(raw_mode)
 
 
-async def _shielded(awaitable: Awaitable[object]) -> None:
+async def _shielded(awaitable: Awaitable[object], *, hung_timeout: float = _CLEANUP_HUNG_TIMEOUT_SECONDS) -> None:
     task = asyncio.ensure_future(awaitable)
     try:
         await asyncio.shield(task)
     except asyncio.CancelledError:
+        # The caller is gone; wait only bounded for the cleanup itself. A
+        # cleanup stuck on a dead greenlet bridge must not turn this coroutine
+        # into another silent hung task.
+        done, pending = await asyncio.wait({task}, timeout=hung_timeout)
+        if pending:
+            # Abandon the wait but keep the task running: cancelling in-flight
+            # DB work is what leaks the SQLite write lock (2026-10-14 incident).
+            logger.error(
+                "session cleanup hung timeout=%.2fs task=%r; abandoning wait, task left running",
+                hung_timeout,
+                task,
+            )
+            task.add_done_callback(_log_late_cleanup_failure)
+            raise
         await task
         raise
+
+
+def _log_late_cleanup_failure(task: asyncio.Task[object]) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("session cleanup failed after abandoned hung wait", exc_info=exc)
+
+
+def _session_transaction_state(session: AsyncSession) -> str:
+    # Must never raise: cleanup-failure logging stays inside the swallow
+    # contract of _safe_rollback/_safe_close.
+    try:
+        return f"in_transaction={session.in_transaction()}"
+    except BaseException:
+        return "in_transaction=unknown"
 
 
 async def _safe_rollback(session: AsyncSession) -> None:
@@ -185,14 +221,22 @@ async def _safe_rollback(session: AsyncSession) -> None:
         return
     try:
         await _shielded(session.rollback())
+    except asyncio.CancelledError:
+        # Caller cancellation is the designed-for path: the shielded rollback
+        # completed, or its wait was abandoned and already logged as hung.
+        return
     except BaseException:
+        logger.exception("session cleanup failed during rollback %s", _session_transaction_state(session))
         return
 
 
 async def _safe_close(session: AsyncSession) -> None:
     try:
         await _shielded(session.close())
+    except asyncio.CancelledError:
+        return
     except BaseException:
+        logger.exception("session cleanup failed during close %s", _session_transaction_state(session))
         return
 
 

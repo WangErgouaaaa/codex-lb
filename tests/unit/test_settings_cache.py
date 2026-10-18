@@ -12,12 +12,13 @@ from app.core.config.settings_cache import SettingsCache
 pytestmark = pytest.mark.unit
 
 
-class _FakeSessionContext:
-    async def __aenter__(self):
-        return object()
+class _FakeSession:
+    def expunge_all(self) -> None:
+        return None
 
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
+
+async def _fake_get_session():
+    yield _FakeSession()
 
 
 @pytest.mark.asyncio
@@ -32,7 +33,7 @@ async def test_settings_cache_ttl_and_invalidate(monkeypatch) -> None:
             state["calls"] += 1
             return SimpleNamespace(version=state["calls"])
 
-    monkeypatch.setattr(settings_cache_module, "SessionLocal", lambda: _FakeSessionContext())
+    monkeypatch.setattr(settings_cache_module, "get_session", _fake_get_session)
     monkeypatch.setattr(settings_cache_module, "SettingsRepository", _FakeRepository)
     monkeypatch.setattr(settings_cache_module, "monotonic", lambda: state["now"])
 
@@ -68,7 +69,7 @@ async def test_settings_cache_returns_stale_value_when_refresh_times_out(monkeyp
                 await anyio.sleep_forever()
             return SimpleNamespace(version=state["calls"])
 
-    monkeypatch.setattr(settings_cache_module, "SessionLocal", lambda: _FakeSessionContext())
+    monkeypatch.setattr(settings_cache_module, "get_session", _fake_get_session)
     monkeypatch.setattr(settings_cache_module, "SettingsRepository", _FakeRepository)
     monkeypatch.setattr(settings_cache_module, "monotonic", lambda: state["now"])
 
@@ -99,7 +100,7 @@ async def test_settings_cache_cold_refresh_timeout_is_not_hidden(monkeypatch) ->
         async def get_or_create(self):
             await anyio.sleep_forever()
 
-    monkeypatch.setattr(settings_cache_module, "SessionLocal", lambda: _FakeSessionContext())
+    monkeypatch.setattr(settings_cache_module, "get_session", _fake_get_session)
     monkeypatch.setattr(settings_cache_module, "SettingsRepository", _BlockingRepository)
 
     cache = SettingsCache(
@@ -127,7 +128,7 @@ async def test_settings_cache_refresh_timeout_uses_backoff_for_waiting_callers(m
                 await anyio.sleep_forever()
             return SimpleNamespace(version=state["calls"])
 
-    monkeypatch.setattr(settings_cache_module, "SessionLocal", lambda: _FakeSessionContext())
+    monkeypatch.setattr(settings_cache_module, "get_session", _fake_get_session)
     monkeypatch.setattr(settings_cache_module, "SettingsRepository", _FakeRepository)
     monkeypatch.setattr(settings_cache_module, "monotonic", lambda: state["now"])
 
@@ -168,7 +169,7 @@ async def test_settings_cache_does_not_serve_beyond_max_stale_during_backoff(mon
                 await anyio.sleep_forever()
             return SimpleNamespace(version=state["calls"])
 
-    monkeypatch.setattr(settings_cache_module, "SessionLocal", lambda: _FakeSessionContext())
+    monkeypatch.setattr(settings_cache_module, "get_session", _fake_get_session)
     monkeypatch.setattr(settings_cache_module, "SettingsRepository", _FakeRepository)
     monkeypatch.setattr(settings_cache_module, "monotonic", lambda: state["now"])
 
@@ -188,4 +189,6 @@ async def test_settings_cache_does_not_serve_beyond_max_stale_during_backoff(mon
     with pytest.raises(TimeoutError):
         await cache.get()
 
-    assert state["calls"] == 3
+    # Single-flight: the max-stale-exceeded get joins the still-in-flight
+    # refresh spawned at now=109 instead of stacking a second one.
+    assert state["calls"] == 2

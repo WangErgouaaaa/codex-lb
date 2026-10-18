@@ -226,12 +226,22 @@ class LeaderElection:
         # Gated bodies that were detached after the cancellation grace and may
         # still be draining shielded singleton work as the (former) leader.
         self._detached_bodies: set[asyncio.Task[Any]] = set()
-        # Renewal tasks abandoned after their time-box elapsed. The heartbeat
-        # must not await a stalled renewal's (possibly hung) cancellation
-        # unwinding, so it drops the task here with a done callback that
-        # consumes the result. Keeping a strong reference prevents the loop
-        # from garbage-collecting a still-pending task mid-flight.
+        # Renewal tasks detached after their time-box elapsed. The heartbeat
+        # must not await a stalled renewal, so it drops the task here with a
+        # done callback that consumes the result. The renewal's database work
+        # is NEVER cancelled (see ``_abandon_renewal``): it keeps running to
+        # its natural completion — execute, commit, clean session teardown —
+        # bounded by the connection's busy_timeout. Keeping a strong
+        # reference prevents the loop from garbage-collecting a still-pending
+        # task mid-flight.
         self._abandoned_renewals: set[asyncio.Task[bool]] = set()
+        # The renewal task this instance dispatched that is still running
+        # (single-flight guard). A detached renewal may keep its bounded
+        # database work in flight well past its time-box (up to ~busy_timeout
+        # after dispatch), so a dispatcher that has not already timed out on
+        # it JOINS the running task instead of stacking a second concurrent
+        # writer on SQLite's single-writer lock.
+        self._renewal_inflight: asyncio.Task[bool] | None = None
         # The single process-level lease-renewal keeper for the graceful-
         # shutdown window. Started once at shutdown-begin (before ANY scheduler
         # is stopped) and stopped by ``release``. Because schedulers are stopped
@@ -261,7 +271,8 @@ class LeaderElection:
 
         ttl = settings.leader_election_ttl_seconds
         loop = asyncio.get_running_loop()
-        try:
+
+        async def _acquire_session() -> tuple[float, float] | None:
             async with get_background_session() as session:
                 acquire_sql = _SQLITE_ACQUIRE_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_ACQUIRE_SQL
                 result = await session.execute(
@@ -307,8 +318,24 @@ class LeaderElection:
                             self._leader_id,
                             exc_info=True,
                         )
-                    return False
+                    return None
                 await session.commit()
+                return acquired_at, remaining
+
+        # The session block runs as its own subtask behind a shield: a
+        # cancellation of the OUTER waiter (scheduler stop, shutdown, drain)
+        # must never interrupt database work that is already in flight — a
+        # cancelled coroutine whose aiosqlite worker thread already holds
+        # SQLite's write lock leaves the lock held with no committer coming
+        # (the 2026-10-14/18 deadlocks). The shield lets the caller return on
+        # its own schedule while the subtask runs to its natural completion
+        # (execute, commit, clean close), bounded by busy_timeout.
+        db_task: asyncio.Task[tuple[float, float] | None] = asyncio.ensure_future(_acquire_session())
+        try:
+            outcome = await asyncio.shield(db_task)
+        except asyncio.CancelledError:
+            _detach_db_work(db_task)
+            raise
         except Exception:
             # A transient acquisition failure must not demote a lease this
             # instance already holds and whose locally tracked deadline has
@@ -333,10 +360,15 @@ class LeaderElection:
             self._is_leader = False
             self._lease_deadline = None
             return False
+        if outcome is None:
+            # The authoritative non-owner verdict was applied (and its commit
+            # attempted) inside the session subtask above.
+            return False
 
-        # A no-row (authoritative non-owner) result already returned False above,
-        # so ``remaining`` is the DB-RETURNED remaining lease of a row this
+        # A no-row (authoritative non-owner) result already returned above, so
+        # ``remaining`` is the DB-RETURNED remaining lease of a row this
         # statement wrote. Anchor the local deadline to it and promote.
+        acquired_at, remaining = outcome
         self._is_leader = True
         self._lease_deadline = acquired_at + remaining
         return True
@@ -356,48 +388,66 @@ class LeaderElection:
 
         ttl = settings.leader_election_ttl_seconds
         loop = asyncio.get_running_loop()
-        async with get_background_session() as session:
-            # Both dialects evaluate the unexpired-lease guard and the new expiry
-            # on the database's own execution-time clock, so a renewal delayed
-            # past the deadline (event-loop stall, row/write-lock wait) matches 0
-            # rows instead of resurrecting a row whose ``expires_at`` has already
-            # passed but no follower has yet claimed. A no-match RETURNS no row
-            # and falls through to the lease-loss demotion below.
-            renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
-            result = await session.execute(
-                renew_sql,
-                {"leader_id": self._leader_id, "ttl": ttl},
-            )
-            # The statement RETURNS the renewed lease's remaining (on the
-            # database's OWN clock) or nothing. Read it BEFORE the commit: a
-            # no-match means another replica now owns the lease (or the row had
-            # expired), an authoritative verdict independent of whether the
-            # (functionally no-op) commit then succeeds. Capture the monotonic
-            # instant right AFTER the statement returns to anchor the renewed
-            # deadline against the DB-remaining below.
-            remaining = _returned_remaining(result)
-            renew_anchor = loop.time()
-            if remaining is None:
-                # Demote on the authoritative lease loss BEFORE committing, so a
-                # ``commit()`` failure on a flaky connection cannot re-raise out
-                # of ``renew()`` and be misread by the heartbeat as a transient
-                # renewal error. A transient error would keep the gated body
-                # running as a believed-leader until another error or the local
-                # deadline; a definitive rowcount-0 loss must demote and cancel
-                # the body immediately.
-                self._is_leader = False
-                self._lease_deadline = None
-                try:
-                    await session.commit()
-                except Exception:
-                    logger.warning(
-                        "Leader lease renewal observed lease loss (rowcount 0) but the commit "
-                        "failed; treating the lease as lost leader_id=%s",
-                        self._leader_id,
-                        exc_info=True,
-                    )
-                return False
-            await session.commit()
+
+        async def _renew_session() -> tuple[float, float] | None:
+            async with get_background_session() as session:
+                # Both dialects evaluate the unexpired-lease guard and the new expiry
+                # on the database's own execution-time clock, so a renewal delayed
+                # past the deadline (event-loop stall, row/write-lock wait) matches 0
+                # rows instead of resurrecting a row whose ``expires_at`` has already
+                # passed but no follower has yet claimed. A no-match RETURNS no row
+                # and falls through to the lease-loss demotion below.
+                renew_sql = _SQLITE_RENEW_SQL if _dialect_name(session) == "sqlite" else _POSTGRES_RENEW_SQL
+                result = await session.execute(
+                    renew_sql,
+                    {"leader_id": self._leader_id, "ttl": ttl},
+                )
+                # The statement RETURNS the renewed lease's remaining (on the
+                # database's OWN clock) or nothing. Read it BEFORE the commit: a
+                # no-match means another replica now owns the lease (or the row had
+                # expired), an authoritative verdict independent of whether the
+                # (functionally no-op) commit then succeeds. Capture the monotonic
+                # instant right AFTER the statement returns to anchor the renewed
+                # deadline against the DB-remaining below.
+                remaining = _returned_remaining(result)
+                renew_anchor = loop.time()
+                if remaining is None:
+                    # Demote on the authoritative lease loss BEFORE committing, so a
+                    # ``commit()`` failure on a flaky connection cannot re-raise out
+                    # of ``renew()`` and be misread by the heartbeat as a transient
+                    # renewal error. A transient error would keep the gated body
+                    # running as a believed-leader until another error or the local
+                    # deadline; a definitive rowcount-0 loss must demote and cancel
+                    # the body immediately.
+                    self._is_leader = False
+                    self._lease_deadline = None
+                    try:
+                        await session.commit()
+                    except Exception:
+                        logger.warning(
+                            "Leader lease renewal observed lease loss (rowcount 0) but the commit "
+                            "failed; treating the lease as lost leader_id=%s",
+                            self._leader_id,
+                            exc_info=True,
+                        )
+                    return None
+                await session.commit()
+                return renew_anchor, remaining
+
+        # Same shielding rationale as :meth:`try_acquire`: the renewal's
+        # database work (an upsert that may already hold SQLite's write lock
+        # inside its aiosqlite worker thread) must never be interrupted by a
+        # cancellation of the waiter. Errors still propagate to the caller as
+        # before; only cancellation is decoupled, leaving the session subtask
+        # to finish (execute, commit, clean close) on its own.
+        db_task: asyncio.Task[tuple[float, float] | None] = asyncio.ensure_future(_renew_session())
+        try:
+            outcome = await asyncio.shield(db_task)
+        except asyncio.CancelledError:
+            _detach_db_work(db_task)
+            raise
+        if outcome is None:
+            return False
 
         # Extend the locally tracked deadline so a concurrent acquire that hits a
         # transient error keeps preserving leadership for the full renewed lease,
@@ -405,6 +455,7 @@ class LeaderElection:
         # monotonic instant to the DB-returned remaining so the deadline tracks
         # the database's authoritative expiry — never backdated by a lock wait,
         # never outrunning the row.
+        renew_anchor, remaining = outcome
         self._lease_deadline = renew_anchor + remaining
         return True
 
@@ -454,7 +505,14 @@ class LeaderElection:
                 _RELEASE_DRAIN_GRACE_SECONDS,
             )
             return
-        try:
+
+        # Same shielding rationale as :meth:`renew`: the shutdown task sweep
+        # (asyncio.run teardown) or an abandoned release's waiter must not
+        # cancel this DELETE between execute and commit, or the aiosqlite
+        # worker thread would keep SQLite's write lock with no committer.
+        # Abandoned by ``_release_leader_lease_within`` the release task may
+        # still be mid-delete when the loop shuts down.
+        async def _delete_lease_row() -> None:
             async with get_background_session() as session:
                 await session.execute(
                     delete(SchedulerLeader).where(
@@ -463,6 +521,13 @@ class LeaderElection:
                     )
                 )
                 await session.commit()
+
+        db_task: asyncio.Task[None] = asyncio.ensure_future(_delete_lease_row())
+        try:
+            await asyncio.shield(db_task)
+        except asyncio.CancelledError:
+            _detach_db_work(db_task)
+            raise
         except Exception as exc:
             # A transient ``database is locked`` while deleting the row is not a
             # release failure: the row is simply left in place and the lease
@@ -573,7 +638,7 @@ class LeaderElection:
         free to acquire the row. Each renewal attempt is time-boxed to
         ``ttl / 6``, and the wait is additionally bounded so it never extends
         past the local deadline: a renewal still in flight at the deadline is
-        abandoned and demoted rather than left running, so the gated body is
+        detached and demoted rather than left trusted, so the gated body is
         cancelled the instant the deadline is reached with no successful
         renewal. Two consecutive failed attempts, or any failed attempt at/after
         the locally tracked lease deadline, demote the holder no later than the
@@ -587,11 +652,11 @@ class LeaderElection:
         sibling's fresher deadline and keeps renewing; the shared flag is cleared
         only on an authoritative rowcount-0 loss or a genuinely expired shared
         lease. The time-box is enforced with ``asyncio.wait`` (not
-        ``asyncio.wait_for``) so a renewal whose cancellation cleanup itself
-        stalls — e.g. a blocked rollback in session teardown — cannot pin the
-        heartbeat past the timeout: once the timeout elapses the attempt is
-        abandoned and counted as an error immediately, without awaiting the
-        renewal coroutine's unwinding. On lease loss
+        ``asyncio.wait_for``) and a timed-out renewal is DETACHED, never
+        cancelled: interrupting its in-progress database work could leave
+        SQLite's write lock held with no committer, so once the timeout
+        elapses the attempt is dropped and counted as an error immediately —
+        without awaiting, or killing, the still-running renewal. On lease loss
         the body is cancelled and awaited for at most
         ``_CANCEL_GRACE_SECONDS``; a body still draining shielded work after
         the grace is detached (its outcome is logged from a done callback),
@@ -648,6 +713,10 @@ class LeaderElection:
             nonlocal lease_deadline, lease_lost
             consecutive_errors = 0
             inflight: asyncio.Task[bool] | None = None
+            # The renewal this heartbeat has already timed out on. Its next
+            # attempt must be a FRESH renewal (never a re-wait of the same
+            # task), so it is passed to ``_dispatch_renewal`` as the join skip.
+            timed_out_renewal: asyncio.Task[bool] | None = None
             try:
                 while True:
                     # Never sleep past the locally tracked lease deadline. A
@@ -692,7 +761,7 @@ class LeaderElection:
                     # 0 and the renewal fires immediately.
                     sleep_budget = min(float(renew_interval), max(0.0, remaining - renew_timeout))
                     await asyncio.sleep(sleep_budget)
-                    inflight = asyncio.ensure_future(self.renew())
+                    inflight = self._dispatch_renewal(skip=timed_out_renewal)
                     # Time-box the attempt to ``renew_timeout``, but never wait
                     # PAST the local deadline: a renewal still in flight at the
                     # deadline is abandoned and demoted rather than left to keep
@@ -701,21 +770,26 @@ class LeaderElection:
                     # deadline (not a time-box later) so the gated body is
                     # cancelled the instant the deadline is reached with no
                     # successful renewal. ``asyncio.wait`` returns on the timeout
-                    # without cancelling or awaiting ``inflight``, so a renewal
-                    # whose cancellation cleanup itself hangs cannot pin the
-                    # heartbeat past the time-box the way ``asyncio.wait_for``
-                    # (which awaits the cancelled coroutine's unwinding) would.
+                    # without cancelling or awaiting ``inflight``, and the
+                    # abandoned renewal's database work is detached (never
+                    # cancelled — see ``_abandon_renewal``) to finish on its own,
+                    # so neither a still-running renewal nor any cleanup of it
+                    # can pin the heartbeat past the time-box the way
+                    # ``asyncio.wait_for`` would.
                     renew_wait = min(renew_timeout, max(0.0, lease_deadline - loop.time()))
                     done, _ = await asyncio.wait({inflight}, timeout=renew_wait)
                     renew_task = inflight
                     inflight = None
                     try:
                         if renew_task not in done:
-                            # Renewal stalled past its time-box. Abandon it
-                            # without awaiting the unwind and treat the lease as
-                            # at risk on the timeout deadline, not whenever the
-                            # renewal finally returns.
+                            # Renewal stalled past its time-box. Detach it —
+                            # without cancelling or awaiting — and treat the
+                            # lease as at risk on the timeout deadline, not
+                            # whenever the renewal finally returns. The next
+                            # attempt retries with a fresh renewal rather
+                            # than re-waiting this one.
                             self._abandon_renewal(renew_task)
+                            timed_out_renewal = renew_task
                             raise TimeoutError("leader lease renewal timed out")
                         renewed = renew_task.result()
                     except Exception:
@@ -776,7 +850,9 @@ class LeaderElection:
                         return
             finally:
                 # If the heartbeat is itself cancelled (e.g. shutdown) while a
-                # renewal is in flight, abandon it so it does not leak.
+                # renewal is in flight, detach it: the database work keeps
+                # running to completion in the background and is consumed by
+                # its done callback, so nothing leaks.
                 if inflight is not None and not inflight.done():
                     self._abandon_renewal(inflight)
 
@@ -865,27 +941,52 @@ class LeaderElection:
         if exc is not None:
             logger.warning("Leader-gated task failed while being cancelled", exc_info=exc)
 
+    def _dispatch_renewal(self, skip: asyncio.Task[bool] | None = None) -> asyncio.Task[bool]:
+        """Start the next lease renewal, joining another dispatcher's running one.
+
+        The election is a shared singleton across every scheduler, so sibling
+        heartbeats dispatch renewals concurrently — and a renewal detached by
+        a watchdog time-box keeps its bounded database work in flight for up
+        to ~busy_timeout past its dispatch. A dispatcher that has already
+        timed out on the running task retries with a FRESH renewal (``skip``:
+        the two-strike fail-fast contract is two real attempts); every other
+        dispatcher JOINS the running task instead of stacking a second
+        concurrent writer on SQLite's single-writer lock. Joined and detached
+        tasks always terminate on their own — their database work is never
+        cancelled and is bounded by busy_timeout — so a wedged renewal cannot
+        pin the guard.
+        """
+        inflight = self._renewal_inflight
+        if inflight is not None and not inflight.done() and inflight is not skip:
+            return inflight
+        task = asyncio.ensure_future(self.renew())
+        self._renewal_inflight = task
+        return task
+
     def _abandon_renewal(self, task: asyncio.Task[bool]) -> None:
-        """Request cancellation of a stalled renewal without awaiting its unwind.
+        """Detach a stalled renewal: its database work is left to finish untouched.
 
         The heartbeat already observed the time-box elapse, so leadership can
-        be treated as at risk immediately. Cancellation cleanup of a hung
-        database call (a blocked rollback or driver call during session
-        teardown) may itself block, so the task is dropped here — tracked with
-        a strong reference and a done callback that consumes its result — and
-        left to unwind in the background rather than blocking the loop.
+        be treated as at risk immediately. The renewal is NEVER cancelled: a
+        cancellation delivered while its upsert is already running inside the
+        aiosqlite worker thread kills the coroutine while the thread may
+        already hold SQLite's write lock, leaving the lock held with no
+        committer until the process dies (the 2026-10-14/18 deadlocks).
+        Instead the task is dropped here — tracked with a strong reference
+        and a done callback that consumes its result — and left to run to its
+        natural completion (execute, commit, clean session teardown),
+        bounded by the connection's busy_timeout. Idempotent: a joined task
+        abandoned by multiple waiters (or across several time-boxes) is
+        registered exactly once.
         """
+        if task in self._abandoned_renewals:
+            return
         self._abandoned_renewals.add(task)
         task.add_done_callback(self._on_renewal_done)
-        task.cancel()
 
     def _on_renewal_done(self, task: asyncio.Task[bool]) -> None:
         self._abandoned_renewals.discard(task)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.debug("Abandoned leader lease renewal finished with error", exc_info=exc)
+        _consume_detached_db_result(task)
 
     def _on_detached_body_done(self, task: asyncio.Task[Any]) -> None:
         self._detached_bodies.discard(task)
@@ -944,7 +1045,8 @@ class LeaderElection:
         """
         settings = get_settings()
         ttl = settings.leader_election_ttl_seconds
-        try:
+
+        async def _renew_row_session() -> bool:
             async with get_background_session() as session:
                 # Guard the renewal on the lease still being unexpired at the
                 # database's execution-time clock so a shutdown/drain renewal can
@@ -960,6 +1062,18 @@ class LeaderElection:
                 renewed = _returned_remaining(result) is not None
                 await session.commit()
                 return renewed
+
+        # The keeper task that awaits this is cancelled outright by
+        # ``_stop_release_keeper`` (shutdown must not be pinned by a wedged
+        # database call), so the session block must survive that cancellation:
+        # shielded here, the write finishes (execute, commit, clean close)
+        # after the keeper has already exited, bounded by busy_timeout.
+        db_task: asyncio.Task[bool] = asyncio.ensure_future(_renew_row_session())
+        try:
+            return await asyncio.shield(db_task)
+        except asyncio.CancelledError:
+            _detach_db_work(db_task)
+            raise
         except Exception as exc:
             # This renewal is best-effort: the caller (the release keeper and the
             # drain loop) treats a ``False`` as "not renewed this cadence" and
@@ -990,6 +1104,27 @@ def _log_detached_body_result(task: asyncio.Task[Any]) -> None:
         logger.warning("Detached leader-gated task failed after lease loss", exc_info=exc)
     else:
         logger.info("Detached leader-gated task completed after lease loss")
+
+
+def _consume_detached_db_result(task: asyncio.Task[Any]) -> None:
+    """Consume a detached database task's outcome so a late failure is observed.
+
+    Shielded session work whose waiter was cancelled keeps running in the
+    background (see :meth:`LeaderElection.renew`); without a consumer its
+    eventual exception would only surface as an unretrieved-task warning at
+    garbage-collection time. Failures are logged at DEBUG: the waiter that
+    gave up already counted its own timeout/error against the lease.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug("Detached leader-lease database work finished with error", exc_info=exc)
+
+
+def _detach_db_work(task: asyncio.Task[Any]) -> None:
+    """Track shielded session work whose waiter was cancelled, not its outcome."""
+    task.add_done_callback(_consume_detached_db_result)
 
 
 _leader_election: LeaderElection | None = None

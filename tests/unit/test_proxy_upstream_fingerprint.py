@@ -484,3 +484,35 @@ def test_synthesis_subagent_namespace_keeps_session_but_splits_thread():
     assert sub["session-id"] == main["session-id"]
     assert sub["thread-id"] != main["thread-id"]
     assert sub["x-client-request-id"] == sub["thread-id"]
+
+
+def test_routing_hint_matches_payload_model_and_optional_tier():
+    from app.core.clients.proxy import apply_codex_routing_hint_header
+
+    bare = {}
+    apply_codex_routing_hint_header(bare, "gpt-6-astra")
+    assert bare == {"x-codex-routing-hint": "model=gpt-6-astra"}
+
+    tiered = {}
+    apply_codex_routing_hint_header(tiered, "gpt-6-astra", "priority")
+    assert tiered == {"x-codex-routing-hint": "model=gpt-6-astra;tier=priority"}
+
+
+def test_routing_hint_rewrites_inbound_case_variants_without_duplicates():
+    from app.core.clients.proxy import apply_codex_routing_hint_header
+
+    headers = {"X-Codex-Routing-Hint": "model=old", "other": "kept"}
+    apply_codex_routing_hint_header(headers, "gpt-6-astra")
+
+    assert headers["x-codex-routing-hint"] == "model=gpt-6-astra"
+    lowered = [key.lower() for key in headers]
+    assert lowered.count("x-codex-routing-hint") == 1
+    assert headers["other"] == "kept"
+
+
+def test_routing_hint_without_model_leaves_headers_untouched():
+    from app.core.clients.proxy import apply_codex_routing_hint_header
+
+    headers = {"X-Codex-Routing-Hint": "model=old"}
+    apply_codex_routing_hint_header(headers, None)
+    assert headers == {"X-Codex-Routing-Hint": "model=old"}

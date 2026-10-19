@@ -837,6 +837,27 @@ def apply_codex_session_headers(
     headers["x-client-request-id"] = headers["thread-id"]
 
 
+def apply_codex_routing_hint_header(
+    headers: dict[str, str],
+    model: str | None,
+    service_tier: str | None = None,
+) -> None:
+    """Rewrite ``x-codex-routing-hint`` to match the outbound payload.
+
+    The real CLI sends this header on every responses request with the
+    body's model slug (and service tier when set). Rewriting rather than
+    only filling keeps it consistent when model alias translation changed
+    the outbound model relative to what the client asked for.
+    """
+    if not model:
+        return
+    value = f"model={model}" + (f";tier={service_tier}" if service_tier else "")
+    for key in list(headers.keys()):
+        if key.lower() == "x-codex-routing-hint":
+            del headers[key]
+    headers["x-codex-routing-hint"] = value
+
+
 def _is_native_codex_user_agent(user_agent: str | None) -> bool:
     if not user_agent:
         return False
@@ -3038,10 +3059,18 @@ async def _stream_responses_with_session(
     payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
     if transport == "websocket":
         upstream_headers = _build_upstream_websocket_headers(headers, access_token, account_id)
+        if _codex_session_synthesis_enabled():
+            apply_codex_routing_hint_header(
+                upstream_headers, payload_dict.get("model"), payload_dict.get("service_tier")
+            )
         method = "GET"
     else:
         upstream_headers = _build_upstream_headers(headers, access_token, account_id)
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
+        if _codex_session_synthesis_enabled():
+            apply_codex_routing_hint_header(
+                upstream_headers, payload_dict.get("model"), payload_dict.get("service_tier")
+            )
         method = "POST"
     upstream_headers = apply_codex_installation_headers(upstream_headers, codex_installation_id)
     remaining_request_timeout = _remaining_total_timeout(
@@ -3314,6 +3343,10 @@ async def _stream_responses_with_session(
         payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
         upstream_headers = _build_upstream_headers(headers, access_token, account_id)
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
+        if _codex_session_synthesis_enabled():
+            apply_codex_routing_hint_header(
+                upstream_headers, payload_dict.get("model"), payload_dict.get("service_tier")
+            )
         upstream_headers = apply_codex_installation_headers(upstream_headers, codex_installation_id)
         method = "POST"
         remaining_request_timeout = _remaining_total_timeout(
@@ -3911,6 +3944,10 @@ class _CompactCommandTransport:
             responses_lite=_payload_uses_responses_lite(payload_dict),
         )
         _apply_responses_lite_http_header(upstream_headers, payload_dict)
+        if _codex_session_synthesis_enabled():
+            apply_codex_routing_hint_header(
+                upstream_headers, payload_dict.get("model"), payload_dict.get("service_tier")
+            )
         try:
             validate_compact_input_wire_budget(payload_dict)
         except ClientPayloadError as exc:

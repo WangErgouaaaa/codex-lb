@@ -358,6 +358,8 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     # Session synthesis: compact keeps the session id namespace but derives
     # its own subagent thread pair.
     assert client.calls[0]["headers"]["x-client-request-id"] == client.calls[0]["headers"]["thread-id"]
+    # Routing hint always mirrors the outbound payload's model slug.
+    assert client.calls[0]["headers"]["x-codex-routing-hint"] == "model=gpt-5.2"
     assert trace.endpoint_id == "ep_1"
 
 
@@ -567,6 +569,7 @@ async def test_stream_responses_uses_codex_client_when_route_is_resolved(route: 
     assert events == ['data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n']
     assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["buffer_response"] is False
+    assert client.calls[0]["headers"]["x-codex-routing-hint"] == "model=gpt-5.2"
     assert trace.endpoint_id == "ep_1"
 
 
